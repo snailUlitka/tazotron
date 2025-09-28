@@ -1,8 +1,9 @@
 # Python
 __pycache__/
-.venv/
-venv/
+/.venv/
+/venv/
 **.pyc
+.ipynb_checkpoints
 
 # Envs
 .env
@@ -10,8 +11,13 @@ venv/
 !.env.example
 
 # Builds
-.build/
-build
+/.build/
+/build
 
 # uv
-.python-version
+/.python-version
+
+# Exports & data
+/.data
+/data
+/exports

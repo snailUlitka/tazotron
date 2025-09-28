@@ -1,0 +1,68 @@
+default_stages: [pre-commit, pre-push]
+fail_fast: true
+
+repos:
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: end-of-file-fixer
+        exclude: LICENSE
+      - id: trailing-whitespace
+        exclude: ^exports/
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: check-merge-conflict
+      - id: check-ast
+      - id: check-executables-have-shebangs
+      - id: debug-statements
+      - id: check-added-large-files
+        args: ["--maxkb=100"]
+        exclude: |
+          (?x)^(
+            ^exports/|
+            ^uv.lock
+          )$
+      - id: check-docstring-first
+      - id: detect-private-key
+      - id: check-case-conflict
+
+  - repo: local
+    hooks:
+      - id: lint
+        name: ruff
+        entry: uv run ruff check --force-exclude
+        require_serial: true
+        language: python
+        types_or: [python, pyi, jupyter]
+
+      - id: format
+        name: ruff-format
+        entry: uv run ruff format --force-exclude
+        require_serial: true
+        language: python
+        types_or: [python, pyi, jupyter]
+
+      - id: type-check
+        name: ty
+        entry: uv run ty check
+        types_or: [python, pyi]
+        require_serial: true
+        language: system
+
+      - id: check-cyrillic
+        name: check-cyrillic
+        entry: uv run python .additional/check_cyrillic.py
+        language: system
+        stages: [pre-commit]
+        types_or: [text, json, yaml, toml, python]
+        files: ^(\.env(\..+)?|.*\.(md|ipynb|py|pyi|toml|ya?ml)$)
+        pass_filenames: true
+        args: ["--include-ext", "md,ipynb,py,pyi,toml,yaml,yml"]

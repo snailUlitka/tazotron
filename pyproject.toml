@@ -14,3 +14,140 @@ tazotron = "tazotron:main"
 [build-system]
 requires = ["uv_build>=0.8.22,<0.9.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+    "ipywidgets>=8.1.7",
+    "jinja2>=3.1.6",
+    "jupyter>=1.1.1",
+    "jupyter-client>=8.6.3",
+    "jupyter-contrib-nbextensions>=0.7.0",
+    "jupyterlab>=4.4.9",
+    "nbconvert>=7.16.6",
+    "nbdime>=4.0.2",
+    "pre-commit>=4.3.0",
+    "pytest>=8.4.2",
+    "ruff>=0.13.2",
+    "ty>=0.0.1a21",
+]
+
+[tool.ruff]
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+    "migrations/*",
+]
+
+line-length = 120
+indent-width = 4
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "ANN",
+  "G004",
+  "D401",
+  "RET504",
+  "ISC001",
+  "D106",
+  "EM101",
+  "COM812",
+  "TRY003",
+]
+
+exclude = [
+  ".additional/*"
+]
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "D", "INP001"]
+"tazotron/__init__.py" = ["D400", "D103"]
+"scripts/*" = ["BLE001", "D", "INP001", "LOG", "T201"]
+"notebooks/*" = ["T201", "B018", "D", "BLE001"]
+"tazotron/settings.py" = ["D106"]
+
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = false
+docstring-code-line-length = "dynamic"
+
+
+[tool.ty.src]
+include = [
+  "tazotron"
+]
+
+[tool.ty.environment]
+python = "./.venv"
+python-version = "3.12"
+
+
+[tool.pytest.ini_options]
+norecursedirs =["hooks", "*.egg", ".eggs", "dist", "build", "docs", ".tox", ".git", "__pycache__"]
+doctest_optionflags = ["NUMBER", "NORMALIZE_WHITESPACE", "IGNORE_EXCEPTION_DETAIL"]
+minversion = "7.0"
+
+markers = [
+    "unit: unit tests",
+    "integration: integration tests"
+]
+
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+addopts = [
+  "--strict-markers",
+  "--tb=short",
+  "--doctest-modules",
+  "--doctest-continue-on-failure",
+  "-ra -q",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+exclude = [".venv"]
+pythonVersion = "3.12"
