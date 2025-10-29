@@ -3,7 +3,6 @@ __pycache__/
 /.venv/
 /venv/
 **.pyc
-.ipynb_checkpoints
 
 # Envs
 .env
@@ -21,3 +20,8 @@ __pycache__/
 /.data
 /data
 /exports
+
+# Notebooks
+/.virtual_documents
+/.jupyter
+.ipynb_checkpoints

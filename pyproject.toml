@@ -25,10 +25,9 @@ dev = [
     "ipykernel>=6.30.1",
     "ipywidgets>=8.1.7",
     "jinja2>=3.1.6",
-    "jupyter>=1.1.1",
     "jupyter-client>=8.6.3",
-    "jupyter-contrib-nbextensions>=0.7.0",
     "jupyterlab>=4.4.9",
+    "jupyterlab-lsp>=5.2.0",
     "nbconvert>=7.16.6",
     "nbdime>=4.0.2",
     "pre-commit>=4.3.0",
@@ -116,16 +115,37 @@ line-ending = "auto"
 docstring-code-format = false
 docstring-code-line-length = "dynamic"
 
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.12"
+root = ["src", "scripts"]
+extra-paths = ["src"]
 
 [tool.ty.src]
-include = [
-  "tazotron"
+respect-ignore-files = true
+exclude = [
+  "**/.ipynb_checkpoints/**",
+  ".venv",
+  ".nox",
+  ".tox",
+  ".ruff_cache",
+  "node_modules",
+  "build",
+  "dist",
+  "notebooks/**",
 ]
 
-[tool.ty.environment]
-python = "./.venv"
-python-version = "3.12"
+[[tool.ty.overrides]]
+include = ["tests/**", "**/test_*.py"]
 
+[tool.ty.overrides.rules]
+possibly-unresolved-reference = "warn"
+
+[tool.ty.rules]
+possibly-unresolved-reference = "warn"
+
+[tool.ty.terminal]
+output-format = "full"
 
 [tool.pytest.ini_options]
 norecursedirs =["hooks", "*.egg", ".eggs", "dist", "build", "docs", ".tox", ".git", "__pycache__"]
@@ -150,9 +170,3 @@ addopts = [
   "--doctest-continue-on-failure",
   "-ra -q",
 ]
-
-[tool.pyright]
-venvPath = "."
-venv = ".venv"
-exclude = [".venv"]
-pythonVersion = "3.12"
