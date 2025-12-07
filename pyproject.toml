@@ -6,7 +6,10 @@ authors = [
     { name = "Mikhail Polevoda", email = "mihail.polevoda@gmail.com" }
 ]
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+]
 
 [project.scripts]
 tazotron = "tazotron:main"
