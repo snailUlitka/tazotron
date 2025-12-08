@@ -14,6 +14,7 @@ from torchvision.transforms import v2
 CT_EXPECTED_DIMS = 4
 LABEL_EXPECTED_DIMS = 3
 LABEL_CHANNELS = 1
+CYST_PROBABILITY = 0.35
 
 
 class AddRandomNecrosis(v2.Transform):
@@ -47,8 +48,9 @@ class AddRandomNecrosis(v2.Transform):
         self,
         probability: float = 0.5,
         target_label: int = 1,
-        radius_range: tuple[int, int] = (3, 8),
-        intensity_drop: tuple[float, float] = (0.35, 0.65),
+        target_labels: tuple[int, ...] | None = None,
+        radius_range: tuple[int, int] = (80, 160),
+        intensity_drop: tuple[float, float] = (0.0, 0.15),
         blur_sigma: float = 1.0,
         num_spots: tuple[int, int] = (1, 3),
         ct_key: str = "ct",
@@ -72,8 +74,12 @@ class AddRandomNecrosis(v2.Transform):
         if num_spots[0] <= 0 or num_spots[0] > num_spots[1]:
             msg = "num_spots must be positive and ordered."
             raise ValueError(msg)
+        if target_labels is not None and len(target_labels) == 0:
+            msg = "target_labels cannot be empty."
+            raise ValueError(msg)
         self.probability = probability
         self.target_label = target_label
+        self.target_labels = target_labels
         self.radius_range = radius_range
         self.intensity_drop = intensity_drop
         self.blur_sigma = blur_sigma
@@ -134,12 +140,70 @@ class AddRandomNecrosis(v2.Transform):
                     device=mask.device,
                 ).item(),
             )
-            drop = float(torch.empty(1, device=mask.device).uniform_(*self.intensity_drop).item())
-            attenuation = self._spherical_attenuation(mask.shape, center, radius, self.blur_sigma, mask.device)
-            attenuation = attenuation * mask.to(dtype=attenuation.dtype)
-            if attenuation.max().item() == 0:
+            rim_thickness = max(1, min(6, int(max(1, radius * 0.1))))
+            inner_radius = max(1, radius - rim_thickness)
+            core_scale = 1.0 - float(
+                torch.empty(1, device=mask.device).uniform_(*self.intensity_drop).item(),
+            )
+            rim_scale = float(torch.empty(1, device=mask.device).uniform_(1.5, 2.0).item())
+            cyst_scale = float(torch.empty(1, device=mask.device).uniform_(0.0, 0.25).item())
+            apply_cyst = torch.rand(1, device=mask.device).item() < CYST_PROBABILITY
+
+            z0 = max(0, int(center[0].item() - radius))
+            y0 = max(0, int(center[1].item() - radius))
+            x0 = max(0, int(center[2].item() - radius))
+            z1 = min(mask.shape[0] - 1, int(center[0].item() + radius))
+            y1 = min(mask.shape[1] - 1, int(center[1].item() + radius))
+            x1 = min(mask.shape[2] - 1, int(center[2].item() + radius))
+
+            region_mask = mask[z0 : z1 + 1, y0 : y1 + 1, x0 : x1 + 1]
+            if not region_mask.any():
                 continue
-            working = working * (1 - drop * attenuation.unsqueeze(0))
+
+            z = torch.arange(z0, z1 + 1, device=mask.device, dtype=torch.float32) - center[0].float()
+            y = torch.arange(y0, y1 + 1, device=mask.device, dtype=torch.float32) - center[1].float()
+            x = torch.arange(x0, x1 + 1, device=mask.device, dtype=torch.float32) - center[2].float()
+            zz, yy, xx = torch.meshgrid(z, y, x, indexing="ij")
+            dist = torch.sqrt(zz.square() + yy.square() + xx.square())
+
+            core_mask = (dist <= inner_radius) & region_mask
+            rim_mask = (dist > inner_radius) & (dist <= radius) & region_mask
+            cyst_mask = torch.zeros_like(core_mask)
+            if apply_cyst and core_mask.any():
+                cyst_radius = max(1, int(radius * 0.25))
+                cyst_center = core_mask.nonzero(as_tuple=False)[
+                    torch.randint(
+                        low=0,
+                        high=core_mask.nonzero(as_tuple=False).shape[0],
+                        size=(1,),
+                        device=mask.device,
+                    ).item()
+                ]
+                cz, cy, cx = cyst_center
+                zc = torch.arange(z0, z1 + 1, device=mask.device, dtype=torch.float32) - (z0 + cz).float()
+                yc = torch.arange(y0, y1 + 1, device=mask.device, dtype=torch.float32) - (y0 + cy).float()
+                xc = torch.arange(x0, x1 + 1, device=mask.device, dtype=torch.float32) - (x0 + cx).float()
+                zz_c, yy_c, xx_c = torch.meshgrid(zc, yc, xc, indexing="ij")
+                cyst_dist = torch.sqrt(zz_c.square() + yy_c.square() + xx_c.square())
+                cyst_mask = (cyst_dist <= cyst_radius) & core_mask
+
+            scale_map = torch.ones_like(region_mask, dtype=working.dtype)
+            scale_map = torch.where(core_mask, core_scale, scale_map)
+            scale_map = torch.where(rim_mask, rim_scale, scale_map)
+            if apply_cyst and cyst_mask.any():
+                scale_map = torch.where(cyst_mask, cyst_scale, scale_map)
+
+            working[
+                :,
+                z0 : z1 + 1,
+                y0 : y1 + 1,
+                x0 : x1 + 1,
+            ] = working[
+                :,
+                z0 : z1 + 1,
+                y0 : y1 + 1,
+                x0 : x1 + 1,
+            ] * scale_map.unsqueeze(0)
         return working
 
     def _mask_from_label(self, label: Tensor) -> Tensor:
@@ -148,6 +212,11 @@ class AddRandomNecrosis(v2.Transform):
         if label.ndim != LABEL_EXPECTED_DIMS:
             msg = "Expected labelmap shaped (D, H, W) or (1, D, H, W)."
             raise ValueError(msg)
+        if self.target_labels is not None:
+            mask = torch.zeros_like(label, dtype=torch.bool)
+            for value in self.target_labels:
+                mask |= label == value
+            return mask
         return label == self.target_label
 
     def _image_to_tensor(self, image: Any) -> Tensor:

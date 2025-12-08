@@ -2225,8 +2225,10 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "diffdrr" },
+    { name = "pillow" },
     { name = "torch" },
     { name = "torchvision" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -2248,8 +2250,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "diffdrr", specifier = ">=0.5.1" },
+    { name = "pillow", specifier = ">=11.0.0" },
     { name = "torch", specifier = ">=2.8.0" },
     { name = "torchvision", specifier = ">=0.23.0" },
+    { name = "tqdm", specifier = ">=4.67.1" },
 ]
 
 [package.metadata.requires-dev]
