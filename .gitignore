@@ -25,8 +25,3 @@ __pycache__/
 /.virtual_documents
 /.jupyter
 .ipynb_checkpoints
-
-# Markdown files temporary used for notes
-**.md
-!/README.md
-!/docs/
