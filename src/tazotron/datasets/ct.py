@@ -9,34 +9,40 @@ import torchio as tio
 from torch.utils.data import Dataset
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
 
 
 class CTDataset(Dataset[tio.Subject]):
-    """Loads CT volumes (and optional labelmaps) from a directory of .nii.gz files.
+    """Loads CT volumes (and labelmaps) from a directory of .nii.gz files.
 
     Returns torchio.Subject objects compatible with downstream transforms such as necrosis injection or DRR rendering.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
-        ct_dir: str | Path,
+        data_path: str | Path,
         *,
-        label_dir: str | Path | None = None,
+        ct_name: str | Path = "ct.nii.gz",
+        label_femoral_head_left: str | Path = "label_femoral_head_left.nii.gz",
+        label_femoral_head_right: str | Path = "label_femoral_head_right.nii.gz",
         transform: Callable[[tio.Subject], tio.Subject] | None = None,
-        ct_key: str = "ct",
-        label_key: str = "label",
-        extensions: Iterable[str] = ("nii.gz",),
     ) -> None:
-        self.ct_dir = Path(ct_dir)
-        self.label_dir = Path(label_dir) if label_dir is not None else None
+        self.data_path = Path(data_path)
+
+        if not self.data_path.is_dir():
+            msg = f"Data path {self.data_path} is not a directory"
+            raise ValueError(msg)
+
+        self.ct_name = Path(ct_name)
+        self.label_femoral_head_left = Path(label_femoral_head_left)
+        self.label_femoral_head_right = Path(label_femoral_head_right)
+
         self.transform = transform
-        self.ct_key = ct_key
-        self.label_key = label_key
-        self.extensions = tuple(extensions)
+
         self.paths = self._collect_paths()
+
         if not self.paths:
-            msg = f"No CT files found in {self.ct_dir}"
+            msg = f"No CT files found in {self.data_path}"
             raise ValueError(msg)
 
     def __len__(self) -> int:
@@ -46,20 +52,33 @@ class CTDataset(Dataset[tio.Subject]):
     def __getitem__(self, index: int) -> tio.Subject:
         """Load one sample as torchio.Subject."""
         ct_path = self.paths[index]
-        subject = tio.Subject({self.ct_key: tio.ScalarImage(ct_path)})
-        if self.label_dir is not None:
-            label_path = self.label_dir / ct_path.name
-            if not label_path.exists():
-                msg = f"Label file not found for {ct_path.name} in {self.label_dir}"
-                raise FileNotFoundError(msg)
-            subject[self.label_key] = tio.LabelMap(label_path)
+
+        label_left_path = ct_path.parent / str(self.label_femoral_head_left)
+        label_right_path = ct_path.parent / str(self.label_femoral_head_right)
+
+        subject = tio.Subject(
+            {
+                "ct": tio.ScalarImage(ct_path),
+                "label_femoral_head_left": tio.LabelMap(label_left_path),
+                "label_femoral_head_right": tio.LabelMap(label_right_path),
+            }
+        )
+
         if self.transform:
             subject = self.transform(subject)
+
         return subject
 
     def _collect_paths(self) -> list[Path]:
-        return sorted(
-            path
-            for path in self.ct_dir.iterdir()
-            if path.is_file() and any(str(path).endswith(ext) for ext in self.extensions)
-        )
+        ct_paths: list[Path] = []
+
+        for entry in sorted(self.data_path.iterdir()):
+            if not entry.is_dir():
+                continue
+
+            ct_path = entry / str(self.ct_name)
+
+            if ct_path.is_file():
+                ct_paths.append(ct_path)
+
+        return ct_paths
