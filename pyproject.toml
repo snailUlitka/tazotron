@@ -12,6 +12,7 @@ dependencies = [
     "diffdrr>=0.5.1",
     "pillow>=11.0.0",
     "tqdm>=4.67.1",
+    "torchio>=0.20.22",
 ]
 
 [project.scripts]
@@ -33,6 +34,7 @@ dev = [
     "nbdime>=4.0.2",
     "pre-commit>=4.3.0",
     "pytest>=8.4.2",
+    "pytest-asyncio>=1.3.0",
     "ruff>=0.13.2",
     "ty>=0.0.1a21",
 ]
@@ -169,5 +171,5 @@ addopts = [
   "--tb=short",
   "--doctest-modules",
   "--doctest-continue-on-failure",
-  "-ra -q",
+  "-ra -qq",
 ]
