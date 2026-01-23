@@ -154,8 +154,8 @@ doctest_optionflags = ["NUMBER", "NORMALIZE_WHITESPACE", "IGNORE_EXCEPTION_DETAI
 minversion = "7.0"
 
 markers = [
-    "unit: unit tests",
-    "integration: integration tests"
+    "fast: lightweight tests for frequent runs",
+    "slow: heavy tests for manual runs"
 ]
 
 testpaths = ["tests"]
