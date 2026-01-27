@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import torch
 import torchio as tio
+from diffdrr.data import read
 from torch.utils.data import Dataset
 
 if TYPE_CHECKING:
@@ -56,13 +58,21 @@ class CTDataset(Dataset[tio.Subject]):
         label_left_path = ct_path.parent / str(self.label_femoral_head_left)
         label_right_path = ct_path.parent / str(self.label_femoral_head_right)
 
-        subject = tio.Subject(
-            {
-                "ct": tio.ScalarImage(ct_path),
-                "label_femoral_head_left": tio.LabelMap(label_left_path),
-                "label_femoral_head_right": tio.LabelMap(label_right_path),
-            }
-        )
+        ct = tio.ScalarImage(ct_path)
+
+        label_left = tio.LabelMap(label_left_path)
+        label_right = tio.LabelMap(label_right_path)
+
+        if label_left.data.shape != label_right.data.shape:
+            msg = "Labelmap shape mismatch for femoral head labels."
+            raise ValueError(msg)
+
+        combined = torch.zeros_like(label_left.data)
+        combined = torch.where(label_left.data > 0, torch.ones_like(combined), combined)
+        combined = torch.where(label_right.data > 0, torch.full_like(combined, 2), combined)
+
+        label = tio.LabelMap(tensor=combined, affine=label_left.affine)
+        subject = read(volume=ct, labelmap=label, ct=ct, label=label)
 
         if self.transform:
             subject = self.transform(subject)

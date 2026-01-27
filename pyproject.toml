@@ -13,6 +13,8 @@ dependencies = [
     "pillow>=11.0.0",
     "tqdm>=4.67.1",
     "torchio>=0.20.22",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
 ]
 
 [project.scripts]
