@@ -12,7 +12,7 @@ CT_BASE_HU = 100.0
 def _make_subject(ct: torch.Tensor, label: torch.Tensor) -> tio.Subject:
     ct_image = tio.ScalarImage(tensor=ct.clone(), affine=torch.eye(4))
     label_image = tio.LabelMap(tensor=label.clone(), affine=torch.eye(4))
-    return tio.Subject({"ct": ct_image, "label": label_image})
+    return tio.Subject({"volume": ct_image, "label": label_image})
 
 
 class TestAddRandomNecrosis:
@@ -22,6 +22,11 @@ class TestAddRandomNecrosis:
             AddRandomNecrosis(intensity=-0.1)
         with pytest.raises(ValueError, match="intensity must be in the range"):
             AddRandomNecrosis(intensity=1.1)
+
+    @pytest.mark.fast
+    def test_rejects_invalid_label_mode(self) -> None:
+        with pytest.raises(ValueError, match="label_mode must be one of"):
+            AddRandomNecrosis(intensity=0.1, label_mode="invalid")
 
     @pytest.mark.fast
     def test_is_inplace_on_subject(self) -> None:
@@ -43,7 +48,7 @@ class TestAddRandomNecrosis:
 
         transform(subject)
 
-        assert torch.equal(subject["ct"].data, ct)
+        assert torch.equal(subject["volume"].data, ct)
 
     @pytest.mark.fast
     def test_empty_mask_leaves_ct_unchanged(self) -> None:
@@ -54,7 +59,7 @@ class TestAddRandomNecrosis:
 
         transform(subject)
 
-        assert torch.equal(subject["ct"].data, ct)
+        assert torch.equal(subject["volume"].data, ct)
 
     @pytest.mark.fast
     def test_intensity_one_sets_all_mask_voxels_to_necrosis_hu(self) -> None:
@@ -69,11 +74,64 @@ class TestAddRandomNecrosis:
         transform(subject)
 
         mask = subject["label"].data == 1
-        masked_values = subject["ct"].data[mask]
-        unmasked_values = subject["ct"].data[~mask]
+        masked_values = subject["volume"].data[mask]
+        unmasked_values = subject["volume"].data[~mask]
         assert masked_values.numel() > 0
         assert torch.all(masked_values == NECROSIS_HU)
         assert torch.all(unmasked_values == CT_BASE_HU)
+
+    @pytest.mark.fast
+    def test_default_labels_include_two(self) -> None:
+        ct = torch.full((1, 2, 2, 2), fill_value=CT_BASE_HU, dtype=torch.float32)
+        label = torch.tensor(
+            [[[[2, 0], [0, 2]], [[0, 0], [2, 0]]]],
+            dtype=torch.int16,
+        )
+        subject = _make_subject(ct, label)
+        transform = AddRandomNecrosis(intensity=1.0, seed=42)
+
+        transform(subject)
+
+        mask = subject["label"].data == 2
+        masked_values = subject["volume"].data[mask]
+        unmasked_values = subject["volume"].data[~mask]
+        assert masked_values.numel() > 0
+        assert torch.all(masked_values == NECROSIS_HU)
+        assert torch.all(unmasked_values == CT_BASE_HU)
+
+    @pytest.mark.fast
+    def test_label_mode_left_only(self) -> None:
+        ct = torch.full((1, 2, 2, 2), fill_value=CT_BASE_HU, dtype=torch.float32)
+        label = torch.tensor(
+            [[[[1, 2], [0, 2]], [[0, 0], [1, 0]]]],
+            dtype=torch.int16,
+        )
+        subject = _make_subject(ct, label)
+        transform = AddRandomNecrosis(intensity=1.0, label_mode="left", seed=42)
+
+        transform(subject)
+
+        left_mask = subject["label"].data == 1
+        right_mask = subject["label"].data == 2
+        assert torch.all(subject["volume"].data[left_mask] == NECROSIS_HU)
+        assert torch.all(subject["volume"].data[right_mask] == CT_BASE_HU)
+
+    @pytest.mark.fast
+    def test_label_mode_right_only(self) -> None:
+        ct = torch.full((1, 2, 2, 2), fill_value=CT_BASE_HU, dtype=torch.float32)
+        label = torch.tensor(
+            [[[[1, 2], [0, 2]], [[0, 0], [1, 0]]]],
+            dtype=torch.int16,
+        )
+        subject = _make_subject(ct, label)
+        transform = AddRandomNecrosis(intensity=1.0, label_mode="right", seed=42)
+
+        transform(subject)
+
+        left_mask = subject["label"].data == 1
+        right_mask = subject["label"].data == 2
+        assert torch.all(subject["volume"].data[left_mask] == CT_BASE_HU)
+        assert torch.all(subject["volume"].data[right_mask] == NECROSIS_HU)
 
     @pytest.mark.fast
     def test_changes_expected_number_of_mask_voxels_for_fractional_intensity(self) -> None:
@@ -85,7 +143,7 @@ class TestAddRandomNecrosis:
         transform(subject)
 
         mask = subject["label"].data == 1
-        necrosis_mask = (subject["ct"].data == NECROSIS_HU) & mask
+        necrosis_mask = (subject["volume"].data == NECROSIS_HU) & mask
         expected = int(mask.sum().item() * 0.5)
         assert int(necrosis_mask.sum().item()) == expected
 
@@ -100,4 +158,4 @@ class TestAddRandomNecrosis:
         transform(subject_a)
         transform(subject_b)
 
-        assert torch.equal(subject_a["ct"].data, subject_b["ct"].data)
+        assert torch.equal(subject_a["volume"].data, subject_b["volume"].data)

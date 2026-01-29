@@ -52,3 +52,14 @@ class TestXrayDataset:
 
             assert torch.count_nonzero(tensor) == 0
 
+    @pytest.mark.fast
+    def test_diff_to_pil_returns_rgb_image(self) -> None:
+        xray_a = torch.zeros((1, 2, 2), dtype=torch.float32)
+        xray_b = torch.tensor([[[0.0, 1.0], [-1.0, 0.0]]], dtype=torch.float32)
+
+        image = XrayDataset.diff_to_pil(xray_a, xray_b, quantile=1.0)
+
+        assert image.mode == "RGB"
+        array = np.array(image)
+        assert array.ndim == 3
+        assert np.any(array != 255)

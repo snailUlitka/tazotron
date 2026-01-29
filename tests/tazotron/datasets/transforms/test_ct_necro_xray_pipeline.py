@@ -7,6 +7,7 @@ import pytest
 import torch
 import torchio as tio
 
+from diffdrr.data import transform_hu_to_density
 from tazotron.datasets.ct import CTDataset
 from tazotron.datasets.transforms.necro import NECROSIS_HU, AddRandomNecrosis
 from tazotron.datasets.transforms.xray import RenderDRR
@@ -49,7 +50,7 @@ def _expected_ct_after_necrosis(
     seed: int,
 ) -> torch.Tensor:
     expected = ct.clone()
-    mask = label[0] == 1
+    mask = (label[0] == 1) | (label[0] == 2)
     coords = mask.nonzero(as_tuple=False)
     num_necrosis_voxels = int(coords.shape[0] * intensity)
     if num_necrosis_voxels <= 0:
@@ -113,11 +114,13 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
         seed=seed,
     )
     expected_xray = expected_ct[0].sum(dim=0, keepdim=True).unsqueeze(0)
+    expected_density = transform_hu_to_density(expected_ct, 1.0)
 
     saved_xray = torch.load(saved_path)
     assert saved_xray.shape == expected_xray.shape
     assert torch.equal(saved_xray, expected_xray)
     assert torch.equal(subject["xray"], expected_xray)
+    assert torch.allclose(subject["density"].data, expected_density)
 
 
 @pytest.mark.slow

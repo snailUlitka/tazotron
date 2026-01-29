@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import Tensor
 from torchvision.transforms import v2
+from diffdrr.data import transform_hu_to_density
 
 if TYPE_CHECKING:
     import torchio as tio
@@ -14,7 +15,9 @@ if TYPE_CHECKING:
 CT_EXPECTED_DIMS = 4
 LABEL_EXPECTED_DIMS = 3
 LABEL_CHANNELS = 1
-TARGET_LABEL = 1
+LEFT_LABEL = 1
+RIGHT_LABEL = 2
+LABEL_MODES = ("left", "right", "both")
 NECROSIS_HU = 50.0
 
 
@@ -28,16 +31,29 @@ class AddRandomNecrosis(v2.Transform):
     ----------
     intensity:
         Fraction of voxels inside the target mask to replace with necrosis. Must be in [0, 1].
+    label_mode:
+        Which femoral head label(s) to use for the necrosis mask: "left", "right", or "both".
+    bone_attenuation_multiplier:
+        Multiplier for high-density voxels when recomputing the density image.
     seed:
         Optional seed for deterministic voxel selection.
     """
 
-    def __init__(self, intensity: float = 0.1, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        intensity: float = 0.1,
+        *,
+        label_mode: str = "both",
+        bone_attenuation_multiplier: float = 1.0,
+        seed: int | None = None,
+    ) -> None:
         super().__init__()
         if not (0.0 <= intensity <= 1.0):
             msg = "intensity must be in the range [0, 1]."
             raise ValueError(msg)
         self.intensity = intensity
+        self.label_mode = self._normalize_label_mode(label_mode)
+        self.bone_attenuation_multiplier = bone_attenuation_multiplier
         self.seed = seed
 
     def __call__(self, subject: tio.Subject) -> tio.Subject:
@@ -56,7 +72,11 @@ class AddRandomNecrosis(v2.Transform):
         if "density" in subject:
             density_image = subject["density"]
             if density_image is not volume_image:
-                self._assign_image_tensor(density_image, updated_volume)
+                updated_density = transform_hu_to_density(
+                    updated_volume,
+                    self.bone_attenuation_multiplier,
+                )
+                self._assign_image_tensor(density_image, updated_density)
         return subject
 
     def _apply_necrosis(self, ct: Tensor, mask: Tensor) -> Tensor:
@@ -95,7 +115,17 @@ class AddRandomNecrosis(v2.Transform):
         if label.ndim != LABEL_EXPECTED_DIMS:
             msg = "Expected labelmap shaped (D, H, W) or (1, D, H, W)."
             raise ValueError(msg)
-        return label == TARGET_LABEL
+        if self.label_mode == "left":
+            return label == LEFT_LABEL
+        if self.label_mode == "right":
+            return label == RIGHT_LABEL
+        return (label == LEFT_LABEL) | (label == RIGHT_LABEL)
+
+    def _normalize_label_mode(self, label_mode: str) -> str:
+        if label_mode not in LABEL_MODES:
+            msg = f"label_mode must be one of {LABEL_MODES}."
+            raise ValueError(msg)
+        return label_mode
 
     def _image_to_tensor(self, image: tio.Image) -> Tensor:
         if hasattr(image, "data"):

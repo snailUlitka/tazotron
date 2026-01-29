@@ -108,7 +108,7 @@ convention = "numpy"
 "tests/*" = ["S", "D", "INP001"]
 "tazotron/__init__.py" = ["D400", "D103"]
 "scripts/*" = ["BLE001", "D", "INP001", "LOG", "T201"]
-"notebooks/*" = ["T201", "B018", "D", "BLE001"]
+"notebooks/*" = ["T201", "B018", "D", "BLE001", "S101"]
 "tazotron/settings.py" = ["D106"]
 
 
