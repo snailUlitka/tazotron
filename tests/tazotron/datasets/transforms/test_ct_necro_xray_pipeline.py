@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING
 
 import pytest
@@ -30,8 +31,8 @@ class _DummyDRR:
         **_: object,
     ) -> torch.Tensor:
         del translations
-        ct = self.subject["ct"].data.to(rotations.device)
-        projection = ct[0].sum(dim=0, keepdim=True).unsqueeze(0)
+        volume = self.subject["volume"].data.to(rotations.device)
+        projection = volume[0].sum(dim=0, keepdim=True).unsqueeze(0)
         return projection
 
 
@@ -117,3 +118,42 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
     assert saved_xray.shape == expected_xray.shape
     assert torch.equal(saved_xray, expected_xray)
     assert torch.equal(subject["xray"], expected_xray)
+
+
+@pytest.mark.slow
+def test_real_drr_differs_with_necrosis_added(tmp_path: Path) -> None:
+    patient_dir = tmp_path / "patient-002"
+    patient_dir.mkdir(parents=True, exist_ok=True)
+
+    ct_tensor = torch.full((1, 8, 8, 8), fill_value=100.0, dtype=torch.float32)
+    left_label = torch.zeros_like(ct_tensor, dtype=torch.int16)
+    left_label[0, 2:6, 2:6, 2:6] = 1
+    right_label = torch.zeros_like(left_label)
+
+    ct_path = patient_dir / "ct.nii.gz"
+    left_path = patient_dir / "label_femoral_head_left.nii.gz"
+    right_path = patient_dir / "label_femoral_head_right.nii.gz"
+
+    _save_image(ct_path, ct_tensor)
+    _save_image(left_path, left_label, label=True)
+    _save_image(right_path, right_label, label=True)
+
+    dataset = CTDataset(tmp_path)
+    base_subject = dataset[0]
+    base_subject["rotations"] = torch.zeros((1, 3), dtype=torch.float32)
+    base_subject["translations"] = torch.tensor([[0.0, 800.0, 0.0]], dtype=torch.float32)
+
+    render = RenderDRR({"device": "cpu", "height": 32, "delx": 1.0})
+
+    subject_clean = copy.deepcopy(base_subject)
+    clean = render(subject_clean)
+    xray_clean = torch.nan_to_num(clean["xray"].detach().cpu())
+
+    subject_necro = copy.deepcopy(base_subject)
+    necro = AddRandomNecrosis(intensity=1.0, seed=42)
+    subject_necro = necro(subject_necro)
+    necro_rendered = render(subject_necro)
+    xray_necro = torch.nan_to_num(necro_rendered["xray"].detach().cpu())
+
+    diff = (xray_necro - xray_clean).abs().sum().item()
+    assert diff > 0.0

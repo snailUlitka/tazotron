@@ -72,7 +72,7 @@ class CTDataset(Dataset[tio.Subject]):
         combined = torch.where(label_right.data > 0, torch.full_like(combined, 2), combined)
 
         label = tio.LabelMap(tensor=combined, affine=label_left.affine)
-        subject = read(volume=ct, labelmap=label, ct=ct, label=label)
+        subject = read(volume=ct, labelmap=label, label=label)
 
         if self.transform:
             subject = self.transform(subject)

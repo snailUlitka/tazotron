@@ -22,7 +22,7 @@ class AddRandomNecrosis(v2.Transform):
     """Inject necrosis into a femoral head mask by setting random voxels to a fixed HU value.
 
     This transform is tailored for subjects produced by `tazotron.datasets.ct.CTDataset`:
-    it expects `subject["ct"]` and `subject["label"]`, and applies changes in place.
+    it expects `subject["volume"]` and `subject["label"]`, and applies changes in place.
 
     Parameters
     ----------
@@ -42,17 +42,21 @@ class AddRandomNecrosis(v2.Transform):
 
     def __call__(self, subject: tio.Subject) -> tio.Subject:
         """Apply the transform to a `torchio.Subject` in place."""
-        ct_image = subject["ct"]
+        volume_image = subject["volume"]
         label_image = subject["label"]
 
-        ct = self._image_to_tensor(ct_image)
+        volume = self._image_to_tensor(volume_image)
         label = self._image_to_tensor(label_image)
         mask = self._mask_from_label(label)
         if not mask.any() or self.intensity == 0.0:
             return subject
 
-        updated_ct = self._apply_necrosis(ct, mask)
-        self._assign_image_tensor(ct_image, updated_ct)
+        updated_volume = self._apply_necrosis(volume, mask)
+        self._assign_image_tensor(volume_image, updated_volume)
+        if "density" in subject:
+            density_image = subject["density"]
+            if density_image is not volume_image:
+                self._assign_image_tensor(density_image, updated_volume)
         return subject
 
     def _apply_necrosis(self, ct: Tensor, mask: Tensor) -> Tensor:
