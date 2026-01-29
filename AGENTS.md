@@ -6,6 +6,7 @@
 - `docs/`: design notes (e.g., `ct_necrosis_pipeline.md`); update when workflows change.
 - `scripts/`: helper scripts for ops/experiments; keep CLI-friendly and documented.
 - `configs/`, `reports/`, `notebooks/`: configuration snapshots, generated artifacts, and explorations; avoid committing large/secret data.
+- `.ipynb` files: treat as ordinary JSON when reading/editing; they are JSON with JupyterLab input/output fields and can be read with `cat`.
 
 ## Build, Test, and Development Commands
 - Setup (Python 3.12): `uv sync --group dev` installs runtime + dev tools into `.venv`.
