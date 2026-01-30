@@ -36,7 +36,9 @@ class AddRandomNecrosis(v2.Transform):
     bone_attenuation_multiplier:
         Multiplier for high-density voxels when recomputing the density image.
     seed:
-        Optional seed for deterministic voxel selection.
+        Optional base seed for deterministic voxel selection across calls.
+    generator:
+        Optional torch.Generator to drive voxel selection. Cannot be set together with seed.
     """
 
     def __init__(
@@ -46,15 +48,22 @@ class AddRandomNecrosis(v2.Transform):
         label_mode: str = "both",
         bone_attenuation_multiplier: float = 1.0,
         seed: int | None = None,
+        generator: torch.Generator | None = None,
     ) -> None:
         super().__init__()
         if not (0.0 <= intensity <= 1.0):
             msg = "intensity must be in the range [0, 1]."
             raise ValueError(msg)
+        if seed is not None and generator is not None:
+            msg = "seed and generator cannot be set at the same time."
+            raise ValueError(msg)
         self.intensity = intensity
         self.label_mode = self._normalize_label_mode(label_mode)
         self.bone_attenuation_multiplier = bone_attenuation_multiplier
         self.seed = seed
+        self._user_generator = generator
+        self._seeded_generator: torch.Generator | None = None
+        self._seeded_generator_device: torch.device | None = None
 
     def __call__(self, subject: tio.Subject) -> tio.Subject:
         """Apply the transform to a `torchio.Subject` in place."""
@@ -94,10 +103,7 @@ class AddRandomNecrosis(v2.Transform):
         if num_necrosis_voxels <= 0:
             return working
 
-        generator: torch.Generator | None = None
-        if self.seed is not None:
-            generator = torch.Generator(device=mask.device.type)
-            generator.manual_seed(self.seed)
+        generator = self._get_generator(mask.device)
 
         perm = torch.randperm(
             num_mask_voxels,
@@ -139,3 +145,25 @@ class AddRandomNecrosis(v2.Transform):
             return
         msg = "Failed to assign tensor to torchio.Image."
         raise TypeError(msg)
+
+    def _get_generator(self, device: torch.device) -> torch.Generator | None:
+        if self._user_generator is not None:
+            generator_device = getattr(self._user_generator, "device", device)
+            if generator_device != device:
+                msg = (
+                    "Provided generator device does not match the mask device. "
+                    "Create the generator on the same device as the tensors."
+                )
+                raise ValueError(msg)
+            return self._user_generator
+
+        if self.seed is None:
+            return None
+
+        if self._seeded_generator is None or self._seeded_generator_device != device:
+            seeded = torch.Generator(device=device)
+            seeded.manual_seed(self.seed)
+            self._seeded_generator = seeded
+            self._seeded_generator_device = device
+
+        return self._seeded_generator
