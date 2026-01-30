@@ -3,160 +3,88 @@
 from __future__ import annotations
 
 import argparse
-import json
-import random
+import copy
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import torch
-import torchio as tio
-from PIL import Image
 from tqdm import tqdm
 
-from tazotron.datasets.transforms import CTToXRTransform
+from tazotron.datasets.ct import CTDataset
+from tazotron.datasets.transforms.necro import AddRandomNecrosis
+from tazotron.datasets.transforms.xray import RenderDRR
+from tazotron.datasets.xray import XrayDataset
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
-DRR_BATCH_RANK = 4
+def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
+    dataset = CTDataset(
+        data_path,
+        ct_name="ct.nii.gz",
+        label_femoral_head_left="label_femoral_head_left.nii.gz",
+        label_femoral_head_right="label_femoral_head_right.nii.gz",
+    )
+
+    with_necro_dir = output_path_dir / "with_necro"
+    without_necro_dir = output_path_dir / "without_necro"
+    with_necro_dir.mkdir(parents=True, exist_ok=True)
+    without_necro_dir.mkdir(parents=True, exist_ok=True)
+
+    render = RenderDRR({"device": "cpu"})
+    necro = AddRandomNecrosis(intensity=0.5, seed=42)
+
+    for index, ct_path in enumerate(
+        tqdm(dataset.paths, desc="Rendering XRays", mininterval=2.0),
+    ):
+        case_name = ct_path.parent.name
+        output_with_necro = with_necro_dir / f"{case_name}.pt"
+        output_without_necro = without_necro_dir / f"{case_name}.pt"
+
+        if output_with_necro.exists() and output_without_necro.exists():
+            continue
+
+        subject = dataset[index]
+        subject["rotations"] = torch.zeros((1, 3), dtype=torch.float32)
+        subject["translations"] = torch.tensor([[0.0, 800.0, 0.0]], dtype=torch.float32)
+
+        for key in ("volume", "density"):
+            if key in subject:
+                subject[key].set_data(subject[key].data.to(torch.float32))
+
+        with torch.no_grad():
+            if not output_without_necro.exists():
+                subject_clean = copy.deepcopy(subject)
+                clean = render(subject_clean)
+                xray_clean = torch.nan_to_num(clean["xray"].detach().cpu())
+                XrayDataset.save_pt(xray_clean, output_without_necro)
+
+            if not output_with_necro.exists():
+                subject_necro = copy.deepcopy(subject)
+                subject_necro = necro(subject_necro)
+                necro_rendered = render(subject_necro)
+                xray_necro = torch.nan_to_num(necro_rendered["xray"].detach().cpu())
+                XrayDataset.save_pt(xray_necro, output_with_necro)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="tazotron")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    xray_parser = subparsers.add_parser(
+        "xray_dataset_from_ct",
+        help="Render X-rays with and without necrosis from CT volumes.",
+    )
+    xray_parser.add_argument("data_path", type=Path)
+    xray_parser.add_argument("output_path_dir", type=Path)
+
+    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """CLI entrypoint."""
-    parser = argparse.ArgumentParser(prog="tazotron", description="CT-to-DRR tooling.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    ct2xr_parser = subparsers.add_parser("ct2xr", help="Render XR/DRR from CT with ROI crop.")
-    ct2xr_parser.add_argument("--volume", required=True, help="Path to CT volume (.nii.gz).")
-    ct2xr_parser.add_argument(
-        "--labels",
-        required=True,
-        help="Comma-separated labelmap paths (.nii.gz) used for cropping ROI.",
-    )
-    ct2xr_parser.add_argument("-o", "--output", required=True, help="Output XR path (.tiff).")
-    ct2xr_parser.add_argument(
-        "--necro",
-        type=int,
-        default=0,
-        help="Inject N random necrosis spots into the CT (0 disables).",
-    )
-
-    subparsers.add_parser("build_dataset", help="Build XR dataset from .data/SlicerScenes.")
-
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "ct2xr":
-        run_ct2xr(args)
-    elif args.command == "build_dataset":
-        run_build_dataset()
-    else:
-        parser.error(f"Unknown command {args.command}")
+    if args.command == "xray_dataset_from_ct":
+        _run_xray_dataset_from_ct(args.data_path, args.output_path_dir)
+        return
 
-
-def run_ct2xr(args: argparse.Namespace) -> None:
-    """Execute CT → ROI crop → DRR render and save TIFF."""
-    ct_path = Path(args.volume)
-    label_paths = [Path(p.strip()) for p in args.labels.split(",") if p.strip()]
-    if not label_paths:
-        msg = "At least one labelmap path must be provided."
-        raise ValueError(msg)
-
-    subject = build_subject(ct_path, label_paths)
-    pipeline = CTToXRTransform(necrosis_spots=max(args.necro, 0))
-
-    subject = pipeline(subject)
-    drr = subject["drr"].detach().cpu().clamp(0, 1)
-    save_tiff(drr, Path(args.output))
-
-
-def build_subject(ct_path: Path, label_paths: list[Path], label_key: str = "label") -> tio.Subject:
-    """Create torchio.Subject from CT and label paths."""
-    subject = tio.Subject(volume=tio.ScalarImage(ct_path))
-    label = merge_labelmaps(label_paths)
-    subject[label_key] = label
-    return subject
-
-
-def merge_labelmaps(label_paths: list[Path]) -> tio.LabelMap:
-    """Merge labelmaps and assign distinct IDs to preserve laterality."""
-    base = tio.LabelMap(label_paths[0])
-    combined = torch.zeros_like(base.data)
-    for idx, path in enumerate(label_paths):
-        img = tio.LabelMap(path)
-        if img.data.shape != combined.shape:
-            msg = f"Labelmap shape mismatch for {path}"
-            raise ValueError(msg)
-        mask = (img.data > 0).to(combined.dtype) * (idx + 1)
-        combined = torch.where(mask > 0, mask, combined)
-    return tio.LabelMap(tensor=combined, affine=base.affine)
-
-
-def save_tiff(drr: torch.Tensor, output_path: Path) -> None:
-    """Save DRR tensor as 16-bit TIFF (lossless deflate)."""
-    if drr.ndim == DRR_BATCH_RANK:
-        drr = drr[0, 0]
-    array = (drr * 65535).to(torch.uint16).cpu().numpy()
-    image = Image.fromarray(array, mode="I;16")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path, compression="tiff_deflate")
-
-
-def run_build_dataset() -> None:
-    """Render dataset from .data/SlicerScenes into .data/output with metadata."""
-    scenes_root = Path(".data/SlicerScenes")
-    output_root = Path(".data/output")
-    output_root.mkdir(parents=True, exist_ok=True)
-    metadata: dict[str, int] = {}
-    index = 0
-    flush_every = 5
-    written_since_flush = 0
-    scene_dirs = sorted([p for p in scenes_root.iterdir() if p.is_dir() and p.name.startswith("s")])
-    for scene in tqdm(scene_dirs, desc="Scenes"):
-        ct_path = scene / "ct.nii.gz"
-        label_paths = [
-            scene / "femur_left.nii.gz-Necro_L-label.nii.gz",
-            scene / "femur_right.nii.gz-Necro_R-label.nii.gz",
-        ]
-        if not ct_path.exists() or any(not p.exists() for p in label_paths):
-            continue
-        # Healthy
-        subject = build_subject(ct_path, label_paths)
-        pipeline = CTToXRTransform(necrosis_spots=0)
-        healthy = pipeline(subject)["drr"].detach().cpu().clamp(0, 1)
-        healthy_name = f"{index:05d}.tiff"
-        save_tiff(healthy, output_root / healthy_name)
-        metadata[f"{index:05d}"] = 0
-        index += 1
-        written_since_flush += 1
-        # Necrosis with random count and intensity
-        necro_spots = random.randint(1, 100)  # noqa: S311
-        intensity_pct = random.randint(1, 100)  # noqa: S311
-        drop = min(0.95, max(0.05, intensity_pct / 100.0))
-        subject_necro = build_subject(ct_path, label_paths)
-        pipeline_necro = CTToXRTransform(
-            necrosis_spots=necro_spots,
-            necrosis_drop=(drop, drop),
-        )
-        necro = pipeline_necro(subject_necro)["drr"].detach().cpu().clamp(0, 1)
-        necro_name = f"{index:05d}.tiff"
-        save_tiff(necro, output_root / necro_name)
-        metadata[f"{index:05d}"] = necro_spots
-        index += 1
-        written_since_flush += 1
-        if written_since_flush >= flush_every:
-            _persist_metadata(output_root, metadata)
-            written_since_flush = 0
-    if metadata:
-        _persist_metadata(output_root, metadata)
-
-
-def _persist_metadata(output_root: Path, metadata: dict[str, int]) -> None:
-    """Safely write metadata.json with atomic replace."""
-    meta_path = output_root / "metadata.json"
-    tmp_path = meta_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    tmp_path.replace(meta_path)
-
-
-if __name__ == "__main__":
-    main()
+    parser.error(f"Unknown command: {args.command}")

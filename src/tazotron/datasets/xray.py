@@ -73,6 +73,14 @@ class XrayDataset(Dataset[Tensor]):
         return Image.fromarray(array, mode="L")
 
     @staticmethod
+    def save_pt(xray: Tensor, path: str | Path) -> None:
+        """Save an XR tensor as a .pt file without normalization."""
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        xray = XrayDataset._squeeze_xray(xray).detach().cpu()
+        torch.save(xray, output_path)
+
+    @staticmethod
     def diff_to_pil(
         xray_a: Tensor,
         xray_b: Tensor,
