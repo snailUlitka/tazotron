@@ -9,56 +9,57 @@ from PIL import Image
 from tazotron.datasets.xray import XrayDataset
 
 
-def _write_tiff(path: Path, array: np.ndarray) -> None:
-    image = Image.fromarray(array)
-    image.save(path)
+def _write_pt(path: Path, tensor: torch.Tensor) -> None:
+    torch.save(tensor, path)
 
 
 class TestXrayDataset:
     @pytest.mark.fast
-    def test_raises_when_no_tiff_files_found(self) -> None:
+    def test_raises_when_no_pt_files_found(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "note.txt").write_text("x", encoding="utf-8")
 
-            with pytest.raises(ValueError, match="No TIFF files found"):
+            with pytest.raises(ValueError, match="No .pt files found"):
                 XrayDataset(data_dir)
 
     @pytest.mark.fast
-    def test_loads_tiff_as_grayscale_tensor_without_batch(self) -> None:
+    def test_loads_pt_as_tensor_without_batch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
-            array = np.array([[0, 65535], [32768, 16384]], dtype=np.uint16)
-            _write_tiff(data_dir / "sample.tiff", array)
+            tensor = torch.tensor([[0.0, 1.0], [2.0, 3.0]], dtype=torch.float32)
+            _write_pt(data_dir / "sample.pt", tensor)
 
             dataset = XrayDataset(data_dir)
-            tensor = dataset[0]
+            loaded = dataset[0]
 
-            assert isinstance(tensor, torch.Tensor)
-            assert tensor.shape == (1, 2, 2)
-            assert tensor.dtype == torch.float32
-            assert torch.isclose(tensor[0, 0, 0], torch.tensor(0.0))
-            assert torch.isclose(tensor[0, 0, 1], torch.tensor(1.0))
+            assert isinstance(loaded, torch.Tensor)
+            assert loaded.shape == (1, 2, 2)
+            assert loaded.dtype == torch.float32
+            assert torch.isclose(loaded[0, 0, 0], torch.tensor(0.0))
+            assert torch.isclose(loaded[0, 0, 1], torch.tensor(1.0))
 
     @pytest.mark.fast
     def test_applies_transform_to_tensor(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
-            array = np.full((2, 2), 1000, dtype=np.uint16)
-            _write_tiff(data_dir / "sample.tiff", array)
+            tensor = torch.full((2, 2), 1000.0, dtype=torch.float32)
+            _write_pt(data_dir / "sample.pt", tensor)
 
             dataset = XrayDataset(data_dir, transform=lambda x: x * 0)
-            tensor = dataset[0]
+            loaded = dataset[0]
 
-            assert torch.count_nonzero(tensor) == 0
+            assert torch.count_nonzero(loaded) == 0
 
     @pytest.mark.fast
     def test_diff_to_pil_returns_rgb_image(self) -> None:
         xray_a = torch.zeros((1, 2, 2), dtype=torch.float32)
         xray_b = torch.tensor([[[0.0, 1.0], [-1.0, 0.0]]], dtype=torch.float32)
 
-        image = XrayDataset.diff_to_pil(xray_a, xray_b, quantile=1.0)
+        with pytest.deprecated_call():
+            image = XrayDataset.diff_to_pil(xray_a, xray_b, quantile=1.0)
 
+        assert isinstance(image, Image.Image)
         assert image.mode == "RGB"
         array = np.array(image)
         assert array.ndim == 3

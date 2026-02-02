@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
+import warnings
+
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -19,7 +20,7 @@ XRAY_EPS = 1e-6
 
 
 class XrayDataset(Dataset[Tensor]):
-    """Load TIFF X-rays from a directory."""
+    """Load .pt X-rays from a directory."""
 
     def __init__(
         self,
@@ -34,7 +35,7 @@ class XrayDataset(Dataset[Tensor]):
         self.transform = transform
         self.paths = self._collect_paths()
         if not self.paths:
-            msg = f"No TIFF files found in {self.data_path}"
+            msg = f"No .pt files found in {self.data_path}"
             raise ValueError(msg)
 
     def __len__(self) -> int:
@@ -42,12 +43,12 @@ class XrayDataset(Dataset[Tensor]):
 
     def __getitem__(self, index: int) -> Tensor:
         path = self.paths[index]
-        image = Image.open(path)
-        if image.mode != "I;16":
-            image = image.convert("I;16")
-        array = np.array(image)
-        tensor = torch.from_numpy(array).to(torch.float32)
-        tensor = self._normalize_tensor(tensor, array.dtype)
+        tensor = torch.load(path)
+        if not isinstance(tensor, torch.Tensor):
+            msg = f"Expected a torch.Tensor in {path}"
+            raise TypeError(msg)
+        tensor = tensor.to(torch.float32)
+        tensor = self._squeeze_xray(tensor)
         if tensor.ndim == 2:
             tensor = tensor.unsqueeze(0)
         if self.transform:
@@ -62,6 +63,11 @@ class XrayDataset(Dataset[Tensor]):
         vmax: float | None = None,
     ) -> Image.Image:
         """Convert an XR tensor to a Pillow grayscale image."""
+        warnings.warn(
+            "XrayDataset.to_pil is deprecated and will change significantly in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         xray = XrayDataset._squeeze_xray(xray)
         if vmin is None:
             vmin = float(xray.min().item())
@@ -89,6 +95,11 @@ class XrayDataset(Dataset[Tensor]):
         vmax: float | None = None,
     ) -> Image.Image:
         """Convert the XR diff (b - a) into a red/white/blue Pillow image."""
+        warnings.warn(
+            "XrayDataset.diff_to_pil is deprecated and will change significantly in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         xray_a = XrayDataset._squeeze_xray(xray_a)
         xray_b = XrayDataset._squeeze_xray(xray_b)
         diff = xray_b - xray_a
@@ -108,7 +119,7 @@ class XrayDataset(Dataset[Tensor]):
         return Image.fromarray(array, mode="RGB")
 
     def _collect_paths(self) -> list[Path]:
-        return sorted(self.data_path.glob("*.tiff")) + sorted(self.data_path.glob("*.tif"))
+        return sorted(self.data_path.glob("*.pt"))
 
     @staticmethod
     def _squeeze_xray(xray: Tensor) -> Tensor:
@@ -117,11 +128,3 @@ class XrayDataset(Dataset[Tensor]):
         elif xray.ndim == 3 and xray.shape[0] == 1:
             xray = xray[0]
         return xray.to(torch.float32)
-
-    @staticmethod
-    def _normalize_tensor(tensor: Tensor, dtype: np.dtype) -> Tensor:
-        if dtype == np.uint16:
-            return tensor / 65535.0
-        if dtype == np.uint8:
-            return tensor / 255.0
-        return tensor
