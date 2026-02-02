@@ -148,14 +148,21 @@ class TestAddRandomNecrosis:
         assert int(necrosis_mask.sum().item()) == expected
 
     @pytest.mark.fast
-    def test_seed_makes_selection_deterministic(self) -> None:
+    def test_seed_makes_selection_deterministic_for_sequence(self) -> None:
         ct = torch.full((1, 3, 3, 3), fill_value=175.0, dtype=torch.float32)
         label = torch.ones((1, 3, 3, 3), dtype=torch.int16)
-        subject_a = _make_subject(ct, label)
-        subject_b = _make_subject(ct, label)
-        transform = AddRandomNecrosis(intensity=0.4, seed=42)
+        subject_a1 = _make_subject(ct, label)
+        subject_a2 = _make_subject(ct, label)
+        subject_b1 = _make_subject(ct, label)
+        subject_b2 = _make_subject(ct, label)
 
-        transform(subject_a)
-        transform(subject_b)
+        transform_a = AddRandomNecrosis(intensity=0.4, seed=42)
+        transform_b = AddRandomNecrosis(intensity=0.4, seed=42)
 
-        assert torch.equal(subject_a["volume"].data, subject_b["volume"].data)
+        transform_a(subject_a1)
+        transform_a(subject_a2)
+        transform_b(subject_b1)
+        transform_b(subject_b2)
+
+        assert torch.equal(subject_a1["volume"].data, subject_b1["volume"].data)
+        assert torch.equal(subject_a2["volume"].data, subject_b2["volume"].data)
