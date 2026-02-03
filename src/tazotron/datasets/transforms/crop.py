@@ -9,13 +9,14 @@ import torchio as tio
 from torch import Tensor
 from torchvision.transforms import v2
 
+from tazotron.datasets.ct import COMBINED_FEMORAL_HEAD
 
 class BilateralHipROICrop(v2.Transform):
     """Crop a bilateral hip ROI containing both femoral heads."""
 
     def __init__(
         self,
-        label_name: str = "label",
+        label_name: str = COMBINED_FEMORAL_HEAD,
         left_id: int = 1,
         right_id: int = 2,
         min_lr_mm: float = 240.0,

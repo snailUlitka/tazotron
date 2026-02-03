@@ -84,10 +84,14 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
     ct_path = patient_dir / "ct.nii.gz"
     left_path = patient_dir / "label_femoral_head_left.nii.gz"
     right_path = patient_dir / "label_femoral_head_right.nii.gz"
+    hip_left_path = patient_dir / "hip_left.nii.gz.seg.nrrd"
+    hip_right_path = patient_dir / "hip_right.nii.gz.seg.nrrd"
 
     _save_image(ct_path, ct_tensor)
     _save_image(left_path, left_label, label=True)
     _save_image(right_path, right_label, label=True)
+    _save_image(hip_left_path, torch.zeros_like(left_label), label=True)
+    _save_image(hip_right_path, torch.zeros_like(left_label), label=True)
 
     intensity = 0.5
     seed = 42
@@ -106,7 +110,7 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
     dataset = CTDataset(tmp_path, transform=pipeline)
     subject = dataset[0]
 
-    combined_label = subject["label"].data
+    combined_label = subject["label_combined_femoral_head"].data
     expected_ct = _expected_ct_after_necrosis(
         ct_tensor,
         combined_label,
@@ -136,10 +140,14 @@ def test_real_drr_differs_with_necrosis_added(tmp_path: Path) -> None:
     ct_path = patient_dir / "ct.nii.gz"
     left_path = patient_dir / "label_femoral_head_left.nii.gz"
     right_path = patient_dir / "label_femoral_head_right.nii.gz"
+    hip_left_path = patient_dir / "hip_left.nii.gz.seg.nrrd"
+    hip_right_path = patient_dir / "hip_right.nii.gz.seg.nrrd"
 
     _save_image(ct_path, ct_tensor)
     _save_image(left_path, left_label, label=True)
     _save_image(right_path, right_label, label=True)
+    _save_image(hip_left_path, torch.zeros_like(left_label), label=True)
+    _save_image(hip_right_path, torch.zeros_like(left_label), label=True)
 
     dataset = CTDataset(tmp_path)
     base_subject = dataset[0]

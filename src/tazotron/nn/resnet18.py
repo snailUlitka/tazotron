@@ -1,8 +1,7 @@
-"""Lightweight ResNet18-style classifier for XR TIFF inputs."""
+"""Lightweight ResNet-style classifier (no residual blocks) for XR TIFF inputs."""
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -10,6 +9,7 @@ import torch
 from torch import nn
 from torch.nn import functional
 from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data.distributed import DistributedSampler
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,16 +36,17 @@ class TrainingConfig:
     dropout: float = 0.3
     device: str | torch.device = "cpu"
     num_workers: int | None = None
-    label_key: str = "label"
+    label_key: str = "label_combined_femoral_head"
     seed: int = 42
     progress_fn: Callable[[str], None] | None = None
 
 
 class ResNet18(nn.Module):
-    """Compact ResNet18-like CNN tailored for grayscale XR inputs."""
+    """Compact ResNet-style CNN (no residual blocks) tailored for grayscale XR inputs."""
 
     def __init__(self, num_classes: int, *, dropout: float = 0.3) -> None:
         super().__init__()
+        # Сверточный стэк для извлечения признаков.
         self.features = nn.Sequential(
             # Block 1
             nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),
@@ -69,6 +70,7 @@ class ResNet18(nn.Module):
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
+        # Классификатор по агрегированным признакам.
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(128, 64),
@@ -79,22 +81,27 @@ class ResNet18(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run forward pass."""
+        # Пропускаем через признаки и классификатор.
         x = self.features(x)
         return self.classifier(x)
 
     @staticmethod
     def _prepare_inputs(x: torch.Tensor, image_size: int) -> torch.Tensor:
         """Convert XR tensor to 3-channel float tensor resized to the requested square size."""
+        # Убираем лишнее измерение, если оно есть.
         if x.dim() == SQUEEZE_RANK:
             x = x.squeeze(1)
+        # Проверяем ожидаемую форму.
         if x.ndim != BATCH_RANK:
             msg = f"Expected input with 4 dims (B, C, H, W) after squeeze, got shape {tuple(x.shape)}"
             raise ValueError(msg)
+        # Приводим к 3 каналам.
         if x.shape[1] == CHANNELS_GRAY:
             x = x.repeat(1, CHANNELS_RGB, 1, 1)
         elif x.shape[1] != CHANNELS_RGB:
             msg = f"Expected 1 or 3 channels, got {x.shape[1]}"
             raise ValueError(msg)
+        # Масштабируем до заданного размера.
         if x.shape[2] != image_size or x.shape[3] != image_size:
             x = functional.interpolate(x, size=(image_size, image_size), mode="bilinear", align_corners=False)
         return x
@@ -108,12 +115,14 @@ class ResNet18(nn.Module):
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Turn a mixed batch (dict/tuple) into model-ready tensors."""
+        # Поддерживаем разные форматы батча.
         if isinstance(batch, dict):
             inputs = batch.get("drr")
             targets = batch.get(label_key)
         elif isinstance(batch, (list, tuple)) and batch:
             candidate = batch[0]
             if isinstance(candidate, dict):
+                # Склеиваем список dict-ов в тензоры.
                 inputs_list = [sample["drr"] for sample in batch]
                 target_list = [sample[label_key] for sample in batch]
                 inputs = torch.stack(inputs_list)
@@ -124,14 +133,18 @@ class ResNet18(nn.Module):
             msg = f"Unsupported batch type: {type(batch)}"
             raise TypeError(msg)
 
+        # Проверяем, что ключевые данные присутствуют.
         if inputs is None or targets is None:
             msg = f"Batch must provide 'drr' and '{label_key}' tensors."
             raise KeyError(msg)
 
+        # Приводим входы и таргеты к нужному виду и устройству.
+        if not isinstance(inputs, torch.Tensor):
+            inputs = torch.as_tensor(inputs)
+        if not isinstance(targets, torch.Tensor):
+            targets = torch.as_tensor(targets)
         inputs = ResNet18._prepare_inputs(inputs.float(), image_size=image_size).to(device)
-        if targets.dim() > 1:
-            targets = targets.squeeze()
-        targets = targets.to(device=device, dtype=torch.long)
+        targets = targets.reshape(-1).to(device=device, dtype=torch.long)
         return inputs, targets
 
     @staticmethod
@@ -142,14 +155,58 @@ class ResNet18(nn.Module):
         shuffle: bool,
         num_workers: int | None,
     ) -> DataLoader[Any]:
+        # Клонируем параметры базового dataloader с новым dataset.
+        sampler = None
+        shuffle_flag = shuffle
+        base_sampler = base_loader.sampler
+        if isinstance(base_sampler, torch.utils.data.WeightedRandomSampler):
+            if isinstance(dataset, Subset) and isinstance(base_loader.dataset, Dataset):
+                weights = base_sampler.weights[dataset.indices]
+            else:
+                weights = base_sampler.weights
+            num_samples = base_sampler.num_samples
+            if not base_sampler.replacement and num_samples > len(weights):
+                num_samples = len(weights)
+            sampler = torch.utils.data.WeightedRandomSampler(
+                weights=weights,
+                num_samples=num_samples,
+                replacement=base_sampler.replacement,
+                generator=base_sampler.generator,
+            )
+            shuffle_flag = False
+        elif isinstance(base_sampler, DistributedSampler):
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=base_sampler.num_replicas,
+                rank=base_sampler.rank,
+                shuffle=shuffle,
+                seed=base_sampler.seed,
+                drop_last=base_sampler.drop_last,
+            )
+            shuffle_flag = False
+        elif not isinstance(
+            base_sampler,
+            (torch.utils.data.RandomSampler, torch.utils.data.SequentialSampler),
+        ):
+            msg = (
+                "Unsupported custom sampler in base_loader; provide a loader without a custom sampler or extend "
+                "_build_loader to handle it."
+            )
+            raise ValueError(msg)
         return DataLoader(
             dataset,
             batch_size=base_loader.batch_size,
-            shuffle=shuffle,
+            shuffle=shuffle_flag,
+            sampler=sampler,
             num_workers=num_workers if num_workers is not None else base_loader.num_workers,
             pin_memory=base_loader.pin_memory,
             drop_last=base_loader.drop_last,
             collate_fn=base_loader.collate_fn,
+            timeout=base_loader.timeout,
+            worker_init_fn=base_loader.worker_init_fn,
+            persistent_workers=base_loader.persistent_workers,
+            prefetch_factor=base_loader.prefetch_factor,
+            generator=base_loader.generator,
         )
 
     @staticmethod
@@ -159,16 +216,19 @@ class ResNet18(nn.Module):
         config: TrainingConfig,
     ) -> dict[str, Any]:
         """Train model with k-fold cross-validation and early stopping."""
+        # Подготавливаем устройство и проверяем модель.
         device = torch.device(config.device)
 
         ResNet18._ensure_model_compatible(model, config)
 
-        base_state = copy.deepcopy(model.state_dict())
+        # Делаем копию начальных весов для перезапуска каждого фолда.
+        base_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         dataset = dataloader.dataset
         dataset_size = len(dataset)
         if dataset_size == 0:
             msg = "Dataset is empty; cannot run cross-validation."
             raise ValueError(msg)
+        # Создаем k-fold разбиение.
         folds = min(config.folds, dataset_size)
         generator = torch.Generator().manual_seed(config.seed)
         shuffled_indices = torch.randperm(dataset_size, generator=generator).tolist()
@@ -179,6 +239,7 @@ class ResNet18(nn.Module):
         idx_cursor = 0
 
         for fold_idx, fold_size in enumerate(fold_sizes):
+            # Формируем индексы train/val для текущего фолда.
             val_indices = shuffled_indices[idx_cursor : idx_cursor + fold_size]
             train_indices = shuffled_indices[:idx_cursor] + shuffled_indices[idx_cursor + fold_size :]
             idx_cursor += fold_size
@@ -188,6 +249,7 @@ class ResNet18(nn.Module):
             if len(train_subset) == 0:
                 msg = "Not enough samples to create a training split; reduce fold count or add data."
                 raise ValueError(msg)
+            # Создаем загрузчики для train/val.
             train_loader = ResNet18._build_loader(
                 train_subset,
                 base_loader=dataloader,
@@ -201,6 +263,7 @@ class ResNet18(nn.Module):
                 num_workers=config.num_workers,
             )
 
+            # Запускаем обучение на фолде.
             fold_results.append(
                 ResNet18._run_fold(
                     model=model,
@@ -211,11 +274,10 @@ class ResNet18(nn.Module):
                     config=config,
                     fold_idx=fold_idx,
                     fold_count=folds,
-                    train_size=len(train_subset),
-                    val_size=len(val_subset),
                 )
             )
 
+        # Агрегируем статистику по лучшим значениям.
         best_acc = [max(result["val_accuracy"]) if result["val_accuracy"] else 0.0 for result in fold_results]
         best_loss = [result["best_val_loss"] for result in fold_results]
         return {
@@ -233,6 +295,7 @@ class ResNet18(nn.Module):
         config: TrainingConfig,
     ) -> dict[str, Any]:
         """Evaluate trained model on a test loader."""
+        # Переводим модель в режим оценки.
         device = torch.device(config.device)
         ResNet18._ensure_model_compatible(model, config)
         model.to(device)
@@ -245,6 +308,7 @@ class ResNet18(nn.Module):
 
         with torch.no_grad():
             for batch in dataloader:
+                # Готовим входы и считаем метрики.
                 inputs, targets = ResNet18._extract_batch(
                     batch,
                     label_key=config.label_key,
@@ -253,20 +317,21 @@ class ResNet18(nn.Module):
                 )
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
-                total_loss += loss.item() * inputs.size(0)
+                batch_size = inputs.size(0)
+                total_loss += loss.item() * batch_size
                 preds = outputs.argmax(dim=1)
                 correct += (preds == targets).sum().item()
                 total += targets.numel()
 
-        dataset_size = len(dataloader.dataset)
-        mean_loss = total_loss / max(dataset_size, 1)
+        # Считаем средние показатели по датасету.
+        mean_loss = total_loss / max(total, 1)
         accuracy = correct / max(total, 1)
         if config.progress_fn:
             config.progress_fn(f"Test: loss={mean_loss:.4f}, acc={accuracy:.4f}")
         return {
             "loss": mean_loss,
             "accuracy": accuracy,
-            "samples": dataset_size,
+            "samples": len(dataloader.dataset),
         }
 
     @staticmethod
@@ -280,10 +345,9 @@ class ResNet18(nn.Module):
         config: TrainingConfig,
         fold_idx: int,
         fold_count: int,
-        train_size: int,
-        val_size: int,
     ) -> dict[str, Any]:
         """Train one fold and return metrics."""
+        # Сбрасываем веса и подготавливаем оптимизатор.
         model.load_state_dict(base_state)
         model.to(device)
         optimizer = torch.optim.Adam(
@@ -301,8 +365,10 @@ class ResNet18(nn.Module):
         val_accuracy: list[float] = []
 
         for epoch in range(config.num_epochs):
+            # Фаза обучения.
             model.train()
             running_loss = 0.0
+            seen = 0
             for batch in train_loader:
                 optimizer.zero_grad()
                 inputs, targets = ResNet18._extract_batch(
@@ -315,11 +381,14 @@ class ResNet18(nn.Module):
                 loss = criterion(outputs, targets)
                 loss.backward()
                 optimizer.step()
-                running_loss += loss.item() * inputs.size(0)
+                batch_size = inputs.size(0)
+                running_loss += loss.item() * batch_size
+                seen += batch_size
 
-            epoch_train_loss = running_loss / train_size
+            epoch_train_loss = running_loss / max(seen, 1)
             train_history.append(epoch_train_loss)
 
+            # Фаза валидации.
             model.eval()
             val_loss = 0.0
             correct = 0
@@ -334,16 +403,18 @@ class ResNet18(nn.Module):
                     )
                     outputs = model(inputs)
                     loss = criterion(outputs, targets)
-                    val_loss += loss.item() * inputs.size(0)
+                    batch_size = inputs.size(0)
+                    val_loss += loss.item() * batch_size
                     preds = outputs.argmax(dim=1)
                     correct += (preds == targets).sum().item()
                     total += targets.numel()
 
-            epoch_val_loss = val_loss / val_size if val_size else float("inf")
+            epoch_val_loss = val_loss / max(total, 1)
             epoch_val_acc = correct / max(total, 1)
             val_history.append(epoch_val_loss)
             val_accuracy.append(epoch_val_acc)
 
+            # Сообщаем прогресс, если требуется.
             if config.progress_fn:
                 config.progress_fn(
                     f"Fold {fold_idx + 1}/{fold_count}, epoch {epoch + 1}: "
@@ -351,6 +422,7 @@ class ResNet18(nn.Module):
                     f"val_acc={epoch_val_acc:.4f}"
                 )
 
+            # Ранняя остановка по лучшей валидации.
             if epoch_val_loss < best_val_loss - config.min_delta:
                 best_val_loss = epoch_val_loss
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -360,6 +432,7 @@ class ResNet18(nn.Module):
                 if epochs_no_improve >= config.patience:
                     break
 
+        # Восстанавливаем лучшее состояние модели.
         if best_state:
             model.load_state_dict(best_state)
 
@@ -375,6 +448,7 @@ class ResNet18(nn.Module):
     @staticmethod
     def _ensure_model_compatible(model: ResNet18, config: TrainingConfig) -> None:
         """Validate head size and align dropout probability with config."""
+        # Проверяем соответствие числа классов.
         final_layer = None
         if isinstance(getattr(model, "classifier", None), nn.Sequential) and len(model.classifier) > 0:
             maybe_linear = list(model.classifier)[-1]
@@ -387,6 +461,7 @@ class ResNet18(nn.Module):
             )
             raise ValueError(msg)
 
+        # Применяем dropout из конфигурации.
         for module in model.modules():
             if isinstance(module, nn.Dropout):
                 module.p = config.dropout

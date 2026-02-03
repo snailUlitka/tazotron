@@ -22,20 +22,20 @@ def _make_subject(
         affine = torch.eye(4, dtype=torch.float32)
     label_map = tio.LabelMap(tensor=label, affine=affine)
     intensity = tio.ScalarImage(tensor=image, affine=affine)
-    return tio.Subject({"label": label_map, "image": intensity, "meta": "keep"})
+    return tio.Subject({"label_combined_femoral_head": label_map, "image": intensity, "meta": "keep"})
 
 
 @pytest.mark.fast
 def test_rejects_non_subject_input() -> None:
     transform = BilateralHipROICrop()
     with pytest.raises(TypeError, match="torchio.Subject"):
-        transform({"label": None})
+        transform({"label_combined_femoral_head": None})
 
 
 @pytest.mark.fast
 def test_requires_both_masks_present() -> None:
     subject = _make_subject()
-    subject["label"].data.zero_()
+    subject["label_combined_femoral_head"].data.zero_()
     transform = BilateralHipROICrop()
     with pytest.raises(ValueError, match="Both left and right hip masks must be present"):
         transform(subject)
@@ -50,12 +50,12 @@ def test_crops_bilateral_roi_with_min_lr_size() -> None:
     assert isinstance(cropped, tio.Subject)
     assert cropped["meta"] == "keep"
 
-    cropped_label = cropped["label"].data[0]
+    cropped_label = cropped["label_combined_femoral_head"].data[0]
     cropped_image = cropped["image"].data[0]
 
     assert cropped_label.shape == cropped_image.shape
     assert cropped_label.shape[-1] == 11
-    assert cropped_label.shape[-2] == subject["label"].data.shape[-2]
+    assert cropped_label.shape[-2] == subject["label_combined_femoral_head"].data.shape[-2]
     assert cropped_label.shape[-3] == 6
     assert (cropped_label == 1).any()
     assert (cropped_label == 2).any()
@@ -80,9 +80,9 @@ def test_anisotropic_spacing_affects_lr_voxels() -> None:
     transform = BilateralHipROICrop(min_lr_mm=10.0, margin_lr_mm=0.0)
     cropped = transform(subject)
 
-    spacing_x = subject["label"].spacing[2]
+    spacing_x = subject["label_combined_femoral_head"].spacing[2]
     assert spacing_x == 2.0
-    assert cropped["label"].data.shape[-1] == 5
+    assert cropped["label_combined_femoral_head"].data.shape[-1] == 5
 
 
 @pytest.mark.fast
@@ -95,10 +95,10 @@ def test_clamps_crop_to_volume_bounds() -> None:
     transform = BilateralHipROICrop(min_lr_mm=20.0, margin_lr_mm=0.0)
     cropped = transform(subject)
 
-    assert cropped["label"].data.shape[-1] == 6
+    assert cropped["label_combined_femoral_head"].data.shape[-1] == 6
     assert cropped["image"].data.shape[-3:] == (6, 6, 6)
     assert torch.allclose(
-        torch.from_numpy(cropped["label"].affine[:3, 3]),
+        torch.from_numpy(cropped["label_combined_femoral_head"].affine[:3, 3]),
         torch.zeros(3, dtype=torch.float64),
     )
 
@@ -109,7 +109,7 @@ def test_large_min_lr_mm_expands_to_full_width() -> None:
     transform = BilateralHipROICrop(min_lr_mm=1_000.0, margin_lr_mm=0.0)
     cropped = transform(subject)
 
-    assert cropped["label"].data.shape[-1] == 10
+    assert cropped["label_combined_femoral_head"].data.shape[-1] == 10
 
 
 @pytest.mark.fast

@@ -11,24 +11,22 @@ import torch
 from tqdm import tqdm
 
 from tazotron.datasets.ct import CTDataset
+from tazotron.datasets.transforms.crop import BilateralHipROICrop
+from tazotron.datasets.transforms.femoral_head import AddFemoralHeadMasks
 from tazotron.datasets.transforms.necro import AddRandomNecrosis
 from tazotron.datasets.transforms.xray import RenderDRR
 from tazotron.datasets.xray import XrayDataset
 
 
 def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
-    dataset = CTDataset(
-        data_path,
-        ct_name="ct.nii.gz",
-        label_femoral_head_left="label_femoral_head_left.nii.gz",
-        label_femoral_head_right="label_femoral_head_right.nii.gz",
-    )
+    dataset = CTDataset(data_path)
 
     with_necro_dir = output_path_dir / "with_necro"
     without_necro_dir = output_path_dir / "without_necro"
     with_necro_dir.mkdir(parents=True, exist_ok=True)
     without_necro_dir.mkdir(parents=True, exist_ok=True)
 
+    crop = BilateralHipROICrop(label_name="label_combined_femoral_head")
     render = RenderDRR({"device": "cpu"})
     necro = AddRandomNecrosis(intensity=0.5, seed=42)
 
@@ -50,6 +48,8 @@ def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
             if key in subject:
                 subject[key].set_data(subject[key].data.to(torch.float32))
 
+        subject = crop(subject)
+
         with torch.no_grad():
             if not output_without_necro.exists():
                 subject_clean = copy.deepcopy(subject)
@@ -65,6 +65,18 @@ def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
                 XrayDataset.save_pt(xray_necro, output_with_necro)
 
 
+def _run_add_femoral_head_masks(data_path: Path) -> None:
+    dataset = CTDataset(data_path)
+    add_masks = AddFemoralHeadMasks(overwrite=True)
+
+    for index, ct_path in enumerate(
+        tqdm(dataset.paths, desc="Adding femoral head masks", mininterval=2.0),
+    ):
+        subject = dataset[index]
+        subject = add_masks(subject)
+        CTDataset.save_femoral_head_masks(subject, ct_path.parent)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tazotron")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -76,6 +88,12 @@ def _build_parser() -> argparse.ArgumentParser:
     xray_parser.add_argument("data_path", type=Path)
     xray_parser.add_argument("output_path_dir", type=Path)
 
+    add_masks_parser = subparsers.add_parser(
+        "add_femoral_head_masks",
+        help="Add femoral head masks to CT folders and save them alongside the volume.",
+    )
+    add_masks_parser.add_argument("data_path", type=Path)
+
     return parser
 
 
@@ -85,6 +103,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "xray_dataset_from_ct":
         _run_xray_dataset_from_ct(args.data_path, args.output_path_dir)
+        return
+    if args.command == "add_femoral_head_masks":
+        _run_add_femoral_head_masks(args.data_path)
         return
 
     parser.error(f"Unknown command: {args.command}")

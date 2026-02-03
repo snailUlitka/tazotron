@@ -12,7 +12,7 @@ CT_BASE_HU = 100.0
 def _make_subject(ct: torch.Tensor, label: torch.Tensor) -> tio.Subject:
     ct_image = tio.ScalarImage(tensor=ct.clone(), affine=torch.eye(4))
     label_image = tio.LabelMap(tensor=label.clone(), affine=torch.eye(4))
-    return tio.Subject({"volume": ct_image, "label": label_image})
+    return tio.Subject({"volume": ct_image, "label_combined_femoral_head": label_image})
 
 
 class TestAddRandomNecrosis:
@@ -73,7 +73,7 @@ class TestAddRandomNecrosis:
 
         transform(subject)
 
-        mask = subject["label"].data == 1
+        mask = subject["label_combined_femoral_head"].data == 1
         masked_values = subject["volume"].data[mask]
         unmasked_values = subject["volume"].data[~mask]
         assert masked_values.numel() > 0
@@ -92,7 +92,7 @@ class TestAddRandomNecrosis:
 
         transform(subject)
 
-        mask = subject["label"].data == 2
+        mask = subject["label_combined_femoral_head"].data == 2
         masked_values = subject["volume"].data[mask]
         unmasked_values = subject["volume"].data[~mask]
         assert masked_values.numel() > 0
@@ -111,8 +111,8 @@ class TestAddRandomNecrosis:
 
         transform(subject)
 
-        left_mask = subject["label"].data == 1
-        right_mask = subject["label"].data == 2
+        left_mask = subject["label_combined_femoral_head"].data == 1
+        right_mask = subject["label_combined_femoral_head"].data == 2
         assert torch.all(subject["volume"].data[left_mask] == NECROSIS_HU)
         assert torch.all(subject["volume"].data[right_mask] == CT_BASE_HU)
 
@@ -128,8 +128,8 @@ class TestAddRandomNecrosis:
 
         transform(subject)
 
-        left_mask = subject["label"].data == 1
-        right_mask = subject["label"].data == 2
+        left_mask = subject["label_combined_femoral_head"].data == 1
+        right_mask = subject["label_combined_femoral_head"].data == 2
         assert torch.all(subject["volume"].data[left_mask] == CT_BASE_HU)
         assert torch.all(subject["volume"].data[right_mask] == NECROSIS_HU)
 
@@ -142,7 +142,7 @@ class TestAddRandomNecrosis:
 
         transform(subject)
 
-        mask = subject["label"].data == 1
+        mask = subject["label_combined_femoral_head"].data == 1
         necrosis_mask = (subject["volume"].data == NECROSIS_HU) & mask
         expected = int(mask.sum().item() * 0.5)
         assert int(necrosis_mask.sum().item()) == expected
