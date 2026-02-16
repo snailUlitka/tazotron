@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 FEMORAL_HEAD_LEFT = "label_femoral_head_left"
 FEMORAL_HEAD_RIGHT = "label_femoral_head_right"
 COMBINED_FEMORAL_HEAD = "label_combined_femoral_head"
-HIP_LEFT = "label_hip_left"
-HIP_RIGHT = "label_hip_right"
+FEMUR_LEFT = "label_femur_left"
+FEMUR_RIGHT = "label_femur_right"
 
 
 class CTDataset(Dataset[tio.Subject]):
@@ -137,8 +137,8 @@ class CTDataset(Dataset[tio.Subject]):
         default_masks: dict[str, str | Path] = {
             FEMORAL_HEAD_LEFT: "label_femoral_head_left.nii.gz",
             FEMORAL_HEAD_RIGHT: "label_femoral_head_right.nii.gz",
-            HIP_LEFT: "hip_left.nii.gz.seg.nrrd",
-            HIP_RIGHT: "hip_right.nii.gz.seg.nrrd",
+            FEMUR_LEFT: "femur_left.nii.gz.seg.nrrd",
+            FEMUR_RIGHT: "femur_right.nii.gz.seg.nrrd",
         }
 
         if mask_paths:

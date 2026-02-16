@@ -6,14 +6,17 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 import torchio as tio
-
 from diffdrr.data import transform_hu_to_density
+
 from tazotron.datasets.ct import CTDataset
 from tazotron.datasets.transforms.necro import NECROSIS_HU, AddRandomNecrosis
 from tazotron.datasets.transforms.xray import RenderDRR
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+LEFT_LABEL_ID = 1
+RIGHT_LABEL_ID = 2
 
 
 class _DummyDRR:
@@ -50,7 +53,7 @@ def _expected_ct_after_necrosis(
     seed: int,
 ) -> torch.Tensor:
     expected = ct.clone()
-    mask = (label[0] == 1) | (label[0] == 2)
+    mask = (label[0] == LEFT_LABEL_ID) | (label[0] == RIGHT_LABEL_ID)
     coords = mask.nonzero(as_tuple=False)
     num_necrosis_voxels = int(coords.shape[0] * intensity)
     if num_necrosis_voxels <= 0:
@@ -84,14 +87,14 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
     ct_path = patient_dir / "ct.nii.gz"
     left_path = patient_dir / "label_femoral_head_left.nii.gz"
     right_path = patient_dir / "label_femoral_head_right.nii.gz"
-    hip_left_path = patient_dir / "hip_left.nii.gz.seg.nrrd"
-    hip_right_path = patient_dir / "hip_right.nii.gz.seg.nrrd"
+    femur_left_path = patient_dir / "femur_left.nii.gz.seg.nrrd"
+    femur_right_path = patient_dir / "femur_right.nii.gz.seg.nrrd"
 
     _save_image(ct_path, ct_tensor)
     _save_image(left_path, left_label, label=True)
     _save_image(right_path, right_label, label=True)
-    _save_image(hip_left_path, torch.zeros_like(left_label), label=True)
-    _save_image(hip_right_path, torch.zeros_like(left_label), label=True)
+    _save_image(femur_left_path, torch.zeros_like(left_label), label=True)
+    _save_image(femur_right_path, torch.zeros_like(left_label), label=True)
 
     intensity = 0.5
     seed = 42
@@ -140,14 +143,14 @@ def test_real_drr_differs_with_necrosis_added(tmp_path: Path) -> None:
     ct_path = patient_dir / "ct.nii.gz"
     left_path = patient_dir / "label_femoral_head_left.nii.gz"
     right_path = patient_dir / "label_femoral_head_right.nii.gz"
-    hip_left_path = patient_dir / "hip_left.nii.gz.seg.nrrd"
-    hip_right_path = patient_dir / "hip_right.nii.gz.seg.nrrd"
+    femur_left_path = patient_dir / "femur_left.nii.gz.seg.nrrd"
+    femur_right_path = patient_dir / "femur_right.nii.gz.seg.nrrd"
 
     _save_image(ct_path, ct_tensor)
     _save_image(left_path, left_label, label=True)
     _save_image(right_path, right_label, label=True)
-    _save_image(hip_left_path, torch.zeros_like(left_label), label=True)
-    _save_image(hip_right_path, torch.zeros_like(left_label), label=True)
+    _save_image(femur_left_path, torch.zeros_like(left_label), label=True)
+    _save_image(femur_right_path, torch.zeros_like(left_label), label=True)
 
     dataset = CTDataset(tmp_path)
     base_subject = dataset[0]

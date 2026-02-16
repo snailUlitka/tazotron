@@ -7,6 +7,9 @@ import torchio as tio
 
 from tazotron.datasets.ct import CTDataset
 
+LEFT_LABEL_ID = 1
+RIGHT_LABEL_ID = 2
+
 
 def _write_ct(path: Path) -> None:
     image = tio.ScalarImage(tensor=torch.zeros(1, 2, 2, 2), affine=torch.eye(4))
@@ -64,8 +67,8 @@ class TestCTDataset:
             subject = dataset[0]
 
             assert subject["label_femoral_head_right"] is None
-            assert torch.any(subject["label_combined_femoral_head"].data == 1)
-            assert not torch.any(subject["label_combined_femoral_head"].data == 2)
+            assert torch.any(subject["label_combined_femoral_head"].data == LEFT_LABEL_ID)
+            assert not torch.any(subject["label_combined_femoral_head"].data == RIGHT_LABEL_ID)
 
     @pytest.mark.fast
     def test_allows_missing_default_masks(self) -> None:
@@ -102,8 +105,8 @@ class TestCTDataset:
             _write_label(case_dir / left_name, left_tensor)
             _write_label(case_dir / right_name, right_tensor)
             _write_label(case_dir / extra_name, extra_tensor)
-            _write_label(case_dir / "hip_left.nii.gz.seg.nrrd")
-            _write_label(case_dir / "hip_right.nii.gz.seg.nrrd")
+            _write_label(case_dir / "femur_left.nii.gz.seg.nrrd")
+            _write_label(case_dir / "femur_right.nii.gz.seg.nrrd")
 
             dataset = CTDataset(
                 temp_dir,
@@ -121,5 +124,5 @@ class TestCTDataset:
             assert "extra_mask" in subject
             assert torch.equal(subject["label_femoral_head_left"].data, left_tensor)
             assert torch.equal(subject["label_femoral_head_right"].data, right_tensor)
-            assert torch.any(subject["label_combined_femoral_head"].data == 1)
-            assert torch.any(subject["label_combined_femoral_head"].data == 2)
+            assert torch.any(subject["label_combined_femoral_head"].data == LEFT_LABEL_ID)
+            assert torch.any(subject["label_combined_femoral_head"].data == RIGHT_LABEL_ID)
