@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import copy
-from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from tqdm import tqdm
@@ -16,6 +16,17 @@ from tazotron.datasets.transforms.femoral_head import AddFemoralHeadMasks
 from tazotron.datasets.transforms.necro import AddRandomNecrosis
 from tazotron.datasets.transforms.xray import RenderDRR
 from tazotron.datasets.xray import XrayDataset
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+BEST_FEMORAL_HEAD_MASK_PARAMS: dict[str, float | int] = {
+    "min_slices_from_top": 5,
+    "area_ratio_threshold": 0.70,
+    "roundness_ratio_threshold": 1.7,
+    "roundness_confirm_slices": 3,
+    "roundness_backstep_slices": 0,
+}
 
 
 def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
@@ -67,7 +78,7 @@ def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
 
 def _run_add_femoral_head_masks(data_path: Path) -> None:
     dataset = CTDataset(data_path)
-    add_masks = AddFemoralHeadMasks(overwrite=True)
+    add_masks = AddFemoralHeadMasks(overwrite=True, **BEST_FEMORAL_HEAD_MASK_PARAMS)
 
     for index, ct_path in enumerate(
         tqdm(dataset.paths, desc="Adding femoral head masks", mininterval=2.0),
@@ -98,6 +109,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    """Run CLI commands for dataset processing utilities."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
