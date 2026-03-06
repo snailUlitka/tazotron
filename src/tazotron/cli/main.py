@@ -31,6 +31,7 @@ BEST_FEMORAL_HEAD_MASK_PARAMS: dict[str, float | int] = {
 
 def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
     dataset = CTDataset(data_path)
+    skipped_empty_drr_cases: list[str] = []
 
     with_necro_dir = output_path_dir / "with_necro"
     without_necro_dir = output_path_dir / "without_necro"
@@ -60,20 +61,41 @@ def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
                 subject[key].set_data(subject[key].data.to(torch.float32))
 
         subject = crop(subject)
+        try:
+            xray_clean: torch.Tensor | None = None
+            xray_necro: torch.Tensor | None = None
+            with torch.no_grad():
+                if not output_without_necro.exists():
+                    subject_clean = copy.deepcopy(subject)
+                    clean = render(subject_clean)
+                    xray_clean = torch.nan_to_num(clean["xray"].detach().cpu())
 
-        with torch.no_grad():
-            if not output_without_necro.exists():
-                subject_clean = copy.deepcopy(subject)
-                clean = render(subject_clean)
-                xray_clean = torch.nan_to_num(clean["xray"].detach().cpu())
+                if not output_with_necro.exists():
+                    subject_necro = copy.deepcopy(subject)
+                    subject_necro = necro(subject_necro)
+                    necro_rendered = render(subject_necro)
+                    xray_necro = torch.nan_to_num(necro_rendered["xray"].detach().cpu())
+
+            if xray_clean is not None:
                 XrayDataset.save_pt(xray_clean, output_without_necro)
-
-            if not output_with_necro.exists():
-                subject_necro = copy.deepcopy(subject)
-                subject_necro = necro(subject_necro)
-                necro_rendered = render(subject_necro)
-                xray_necro = torch.nan_to_num(necro_rendered["xray"].detach().cpu())
+            if xray_necro is not None:
                 XrayDataset.save_pt(xray_necro, output_with_necro)
+        except ValueError as exc:
+            if "Rendered DRR is empty" in str(exc):
+                # TODO: Investigate why some cases produce empty DRRs (camera pose misses the volume),
+                # likely due geometry/orientation inconsistencies in source CT metadata.
+                # Temporary workaround: skip these cases so full-batch generation can continue.
+                skipped_empty_drr_cases.append(case_name)
+                tqdm.write(f"[WARN] Skipping {case_name}: {exc}")
+                continue
+            raise
+
+    skipped_count = len(skipped_empty_drr_cases)
+    tqdm.write(f"Skipped due to empty DRR: {skipped_count}")
+    if skipped_count > 0:
+        skipped_log_path = output_path_dir / "skipped_empty_drr_cases.txt"
+        skipped_log_path.write_text("\n".join(skipped_empty_drr_cases) + "\n", encoding="utf-8")
+        tqdm.write(f"Skipped case list saved to: {skipped_log_path}")
 
 
 def _run_add_femoral_head_masks(data_path: Path) -> None:
