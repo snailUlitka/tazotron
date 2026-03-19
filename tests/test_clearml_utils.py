@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, ClassVar
 
-from notebooks.utils import clearml_utils
+from tazotron.integrations import clearml
 
 
 class FakeLogger:
@@ -31,8 +31,22 @@ class FakeTask:
     init_calls: ClassVar[list[dict[str, Any]]] = []
 
     @classmethod
-    def init(cls, project_name: str, task_name: str, tags: list[str] | None = None) -> FakeTask:
-        cls.init_calls.append({"project_name": project_name, "task_name": task_name, "tags": tags})
+    def init(
+        cls,
+        project_name: str,
+        task_name: str,
+        tags: list[str] | None = None,
+        *,
+        auto_connect_frameworks: dict[str, bool] | bool | None = None,
+    ) -> FakeTask:
+        cls.init_calls.append(
+            {
+                "project_name": project_name,
+                "task_name": task_name,
+                "tags": tags,
+                "auto_connect_frameworks": auto_connect_frameworks,
+            }
+        )
         return cls()
 
     def __init__(self) -> None:
@@ -50,8 +64,20 @@ class FakeTask:
         self.config_calls.append(config)
         return {"connected": config}
 
-    def upload_artifact(self, name: str, artifact_object: str) -> None:
-        self.upload_calls.append({"name": name, "artifact_object": artifact_object})
+    def upload_artifact(
+        self,
+        name: str,
+        artifact_object: str | Path,
+        *,
+        wait_on_upload: bool = False,
+    ) -> None:
+        self.upload_calls.append(
+            {
+                "name": name,
+                "artifact_object": artifact_object,
+                "wait_on_upload": wait_on_upload,
+            }
+        )
 
     def mark_completed(self) -> None:
         self.mark_completed_calls += 1
@@ -78,7 +104,7 @@ class FakeDataset:
 
 
 def test_start_experiment_disabled_is_noop() -> None:
-    run = clearml_utils.start_experiment(
+    run = clearml.start_experiment(
         config={"epochs": 2},
         task_name="disabled-test",
         enabled=False,
@@ -92,9 +118,9 @@ def test_start_experiment_disabled_is_noop() -> None:
 
 def test_start_experiment_enabled_uses_clearml(monkeypatch: Any) -> None:
     FakeTask.init_calls = []
-    monkeypatch.setattr(clearml_utils, "_load_clearml", lambda: (FakeDataset, FakeTask))
+    monkeypatch.setattr(clearml, "_load_clearml", lambda: (FakeDataset, FakeTask))
 
-    run = clearml_utils.start_experiment(
+    run = clearml.start_experiment(
         config={"lr": 1e-3},
         task_name="train-resnet18",
         project_name="Tazotron",
@@ -107,23 +133,28 @@ def test_start_experiment_enabled_uses_clearml(monkeypatch: Any) -> None:
     assert isinstance(run.logger, FakeLogger)
     assert run.connected_config == {"connected": {"lr": 1e-3}}
     assert FakeTask.init_calls == [
-        {"project_name": "Tazotron", "task_name": "train-resnet18", "tags": ["resnet18"]}
+        {
+            "project_name": "Tazotron",
+            "task_name": "train-resnet18",
+            "tags": ["resnet18"],
+            "auto_connect_frameworks": {"pytorch": False},
+        }
     ]
     assert run.task.config_calls == [{"lr": 1e-3}]
 
 
 def test_logging_artifact_and_finalize_enabled(monkeypatch: Any, tmp_path: Path) -> None:
-    monkeypatch.setattr(clearml_utils, "_load_clearml", lambda: (FakeDataset, FakeTask))
-    run = clearml_utils.start_experiment(config={"seed": 42}, task_name="run", enabled=True)
+    monkeypatch.setattr(clearml, "_load_clearml", lambda: (FakeDataset, FakeTask))
+    run = clearml.start_experiment(config={"seed": 42}, task_name="run", enabled=True)
 
-    clearml_utils.log_metrics(
+    clearml.log_metrics(
         run=run,
         metrics={"loss": 0.123, "accuracy": 0.987},
         split="train",
         iteration=3,
         fold=2,
     )
-    clearml_utils.log_scalar(
+    clearml.log_scalar(
         run=run,
         title="val_f1",
         series="val_fold_2",
@@ -133,8 +164,8 @@ def test_logging_artifact_and_finalize_enabled(monkeypatch: Any, tmp_path: Path)
 
     checkpoint = tmp_path / "best_fold.pt"
     checkpoint.write_text("checkpoint")
-    clearml_utils.upload_model_artifact(run, alias="best_model", path=checkpoint)
-    clearml_utils.finish_experiment(run, save_task=False)
+    clearml.upload_model_artifact(run, alias="best_model", path=checkpoint)
+    clearml.finish_experiment(run, save_task=False)
 
     assert run.logger is not None
     expected_logger_call_count = 3
@@ -160,16 +191,42 @@ def test_logging_artifact_and_finalize_enabled(monkeypatch: Any, tmp_path: Path)
 
     assert run.task is not None
     assert run.task.upload_calls == [
-        {"name": "best_model", "artifact_object": str(checkpoint)}
+        {"name": "best_model", "artifact_object": checkpoint.resolve(), "wait_on_upload": True}
     ]
     assert run.task.close_calls == 1
     assert run.task.set_archived_calls == [True]
     assert run.task.mark_completed_calls == 0
 
 
+def test_upload_state_dict_artifact_serializes_and_uploads(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setattr(clearml, "_load_clearml", lambda: (FakeDataset, FakeTask))
+    run = clearml.start_experiment(config={"seed": 42}, task_name="run", enabled=True)
+
+    class FakeModel:
+        def state_dict(self) -> dict[str, int]:
+            return {"weight": 1}
+
+    artifact_path = clearml.upload_state_dict_artifact(
+        run=run,
+        alias="best_model_state_dict",
+        model=FakeModel(),
+        path=tmp_path / "best_fold_state_dict.pt",
+    )
+
+    assert artifact_path.is_file()
+    assert run.task is not None
+    assert run.task.upload_calls == [
+        {
+            "name": "best_model_state_dict",
+            "artifact_object": artifact_path.resolve(),
+            "wait_on_upload": True,
+        }
+    ]
+
+
 def test_wrappers_respect_disabled_mode(monkeypatch: Any, tmp_path: Path) -> None:
-    monkeypatch.setattr(clearml_utils, "CLEARML_ENABLED", False)
-    task, logger, config = clearml_utils.init_task(config={"x": 1}, task_name="legacy")
+    monkeypatch.setattr(clearml, "CLEARML_ENABLED", False)
+    task, logger, config = clearml.init_task(config={"x": 1}, task_name="legacy")
 
     assert task is None
     assert logger is None
@@ -181,10 +238,10 @@ def test_wrappers_respect_disabled_mode(monkeypatch: Any, tmp_path: Path) -> Non
     artifact = tmp_path / "legacy.pt"
     artifact.write_text("legacy")
 
-    clearml_utils.upload_artifact(fake_task, alias="legacy_model", path=artifact)
-    clearml_utils.finalize_task(fake_task)
-    clearml_utils.report_training_batch(fake_logger, dataset_name="xray", loss_value=0.1, iteration=1)
-    clearml_utils.report_epoch_loss(fake_logger, dataset_name="xray", loss_value=0.1, epoch=1)
+    clearml.upload_artifact(fake_task, alias="legacy_model", path=artifact)
+    clearml.finalize_task(fake_task)
+    clearml.report_training_batch(fake_logger, dataset_name="xray", loss_value=0.1, iteration=1)
+    clearml.report_epoch_loss(fake_logger, dataset_name="xray", loss_value=0.1, epoch=1)
 
     assert fake_task.upload_calls == []
     assert fake_task.mark_completed_calls == 0
@@ -195,13 +252,13 @@ def test_wrappers_respect_disabled_mode(monkeypatch: Any, tmp_path: Path) -> Non
 
 def test_get_dataset_path_and_best_fold(monkeypatch: Any) -> None:
     FakeDataset.get_calls = []
-    monkeypatch.setattr(clearml_utils, "_load_clearml", lambda: (FakeDataset, FakeTask))
+    monkeypatch.setattr(clearml, "_load_clearml", lambda: (FakeDataset, FakeTask))
 
-    dataset_path = clearml_utils.get_dataset_path(dataset_project="xray", dataset_name="v1")
+    dataset_path = clearml.get_dataset_path(dataset_project="xray", dataset_name="v1")
     assert dataset_path == Path("/tmp/fake-dataset")
     assert FakeDataset.get_calls == [{"dataset_project": "xray", "dataset_name": "v1"}]
 
-    fold_index, fold_payload = clearml_utils.select_best_fold(
+    fold_index, fold_payload = clearml.select_best_fold(
         [
             {"fold": 1, "val": {"f1": 0.71}, "test": {"f1": 0.68}},
             {"fold": 2, "val": {"f1": 0.79}, "test": {"f1": 0.66}},
