@@ -76,6 +76,9 @@ line-length = 120
 indent-width = 4
 target-version = "py312"
 
+[tool.uv]
+cache-dir = "./.uv-cache"
+
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
