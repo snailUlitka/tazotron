@@ -24,6 +24,8 @@ class RenderDRRConfig(BaseModel):
     delx: float = 2.0
     width: int | None = None
     dely: float | None = None
+    x0: float = 0.0
+    y0: float = 0.0
     renderer: str = "siddon"
     patch_size: int | None = None
     device: torch.device | str | None = None
@@ -57,20 +59,23 @@ class RenderDRR(v2.Transform):
         rotations = subject.get("rotations")
         translations = subject.get("translations")
         self._validate_pose(rotations, translations)
+        config = self.resolve_config(subject)
 
         drr_module = DRR(
             subject,
-            sdd=self.config.sdd,
-            height=self.config.height,
-            delx=self.config.delx,
-            width=self.config.width,
-            dely=self.config.dely,
-            reverse_x_axis=self.config.reverse_x_axis,
-            patch_size=self.config.patch_size,
-            renderer=self.config.renderer,
+            sdd=config.sdd,
+            height=config.height,
+            delx=config.delx,
+            width=config.width,
+            dely=config.dely,
+            x0=config.x0,
+            y0=config.y0,
+            reverse_x_axis=config.reverse_x_axis,
+            patch_size=config.patch_size,
+            renderer=config.renderer,
         )
 
-        target_device = self.config.resolved_device() or rotations.device
+        target_device = config.resolved_device() or rotations.device
 
         rotations = rotations.to(target_device)
         translations = translations.to(target_device)
@@ -90,6 +95,25 @@ class RenderDRR(v2.Transform):
         subject["xray"] = drr_image
 
         return subject
+
+    def resolve_config(self, subject: tio.Subject | None = None) -> RenderDRRConfig:
+        """Resolve the effective DRR config for a subject."""
+        if subject is None:
+            return self.config
+
+        override = subject.get("drr_config")
+        if override is None:
+            return self.config
+
+        base = self.config.model_dump()
+        if isinstance(override, RenderDRRConfig):
+            payload = override.model_dump(exclude_none=True)
+        elif isinstance(override, dict):
+            payload = {key: value for key, value in override.items() if value is not None}
+        else:
+            msg = "subject['drr_config'] must be a dict or RenderDRRConfig."
+            raise TypeError(msg)
+        return RenderDRRConfig.model_validate({**base, **payload})
 
     def _validate_pose(self, rotations: Tensor | None, translations: Tensor | None) -> None:
         if rotations is None or translations is None:

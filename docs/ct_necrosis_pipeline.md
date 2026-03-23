@@ -13,4 +13,10 @@ Pipeline overview (rough sketch):
 - Rule-based sphere/hemisphere detector for anatomical localization.
 - Binary classifier: X-ray → {necrosis present, absent}.
 
+### Current rendering note
+- Production XR generation no longer crops the CT volume before DRR rendering.
+- Framing is controlled by a deterministic AP auto-pose computed from bilateral femoral-head masks in world coordinates.
+- Detector pixel spacing is adjusted per case so both femoral heads stay inside the field of view with a fixed physical margin.
+- Legacy crop-based framing is kept only for before/after benchmarking.
+
 Reference dataset info (sphere centers, etc.): https://github.com/rg2/DeepFluoroLabeling-IPCAI2020?tab=readme-ov-file#datasets

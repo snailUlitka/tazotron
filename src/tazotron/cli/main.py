@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import copy
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import torch
 from tqdm import tqdm
 
 from tazotron.datasets.ct import CTDataset
-from tazotron.datasets.transforms.crop import BilateralHipROICrop
 from tazotron.datasets.transforms.femoral_head import AddFemoralHeadMasks
-from tazotron.datasets.transforms.necro import AddRandomNecrosis
-from tazotron.datasets.transforms.xray import RenderDRR
-from tazotron.datasets.xray import XrayDataset
+from tazotron.xray_generation import render_xray_dataset_from_ct
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -30,72 +25,7 @@ BEST_FEMORAL_HEAD_MASK_PARAMS: dict[str, float | int] = {
 
 
 def _run_xray_dataset_from_ct(data_path: Path, output_path_dir: Path) -> None:
-    dataset = CTDataset(data_path)
-    skipped_empty_drr_cases: list[str] = []
-
-    with_necro_dir = output_path_dir / "with_necro"
-    without_necro_dir = output_path_dir / "without_necro"
-    with_necro_dir.mkdir(parents=True, exist_ok=True)
-    without_necro_dir.mkdir(parents=True, exist_ok=True)
-
-    crop = BilateralHipROICrop(label_name="label_combined_femoral_head")
-    render = RenderDRR({"device": "cpu"})
-    necro = AddRandomNecrosis(intensity=0.5, seed=42)
-
-    for index, ct_path in enumerate(
-        tqdm(dataset.paths, desc="Rendering XRays", mininterval=2.0),
-    ):
-        case_name = ct_path.parent.name
-        output_with_necro = with_necro_dir / f"{case_name}.pt"
-        output_without_necro = without_necro_dir / f"{case_name}.pt"
-
-        if output_with_necro.exists() and output_without_necro.exists():
-            continue
-
-        subject = dataset[index]
-        subject["rotations"] = torch.zeros((1, 3), dtype=torch.float32)
-        subject["translations"] = torch.tensor([[0.0, 800.0, 0.0]], dtype=torch.float32)
-
-        for key in ("volume", "density"):
-            if key in subject:
-                subject[key].set_data(subject[key].data.to(torch.float32))
-
-        subject = crop(subject)
-        try:
-            xray_clean: torch.Tensor | None = None
-            xray_necro: torch.Tensor | None = None
-            with torch.no_grad():
-                if not output_without_necro.exists():
-                    subject_clean = copy.deepcopy(subject)
-                    clean = render(subject_clean)
-                    xray_clean = torch.nan_to_num(clean["xray"].detach().cpu())
-
-                if not output_with_necro.exists():
-                    subject_necro = copy.deepcopy(subject)
-                    subject_necro = necro(subject_necro)
-                    necro_rendered = render(subject_necro)
-                    xray_necro = torch.nan_to_num(necro_rendered["xray"].detach().cpu())
-
-            if xray_clean is not None:
-                XrayDataset.save_pt(xray_clean, output_without_necro)
-            if xray_necro is not None:
-                XrayDataset.save_pt(xray_necro, output_with_necro)
-        except ValueError as exc:
-            if "Rendered DRR is empty" in str(exc):
-                # TODO: Investigate why some cases produce empty DRRs (camera pose misses the volume),
-                # likely due geometry/orientation inconsistencies in source CT metadata.
-                # Temporary workaround: skip these cases so full-batch generation can continue.
-                skipped_empty_drr_cases.append(case_name)
-                tqdm.write(f"[WARN] Skipping {case_name}: {exc}")
-                continue
-            raise
-
-    skipped_count = len(skipped_empty_drr_cases)
-    tqdm.write(f"Skipped due to empty DRR: {skipped_count}")
-    if skipped_count > 0:
-        skipped_log_path = output_path_dir / "skipped_empty_drr_cases.txt"
-        skipped_log_path.write_text("\n".join(skipped_empty_drr_cases) + "\n", encoding="utf-8")
-        tqdm.write(f"Skipped case list saved to: {skipped_log_path}")
+    render_xray_dataset_from_ct(data_path, output_path_dir, framing_mode="autopose", device="cpu")
 
 
 def _run_add_femoral_head_masks(data_path: Path) -> None:

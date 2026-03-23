@@ -4,6 +4,13 @@ import torchio as tio
 
 from tazotron.datasets.transforms.xray import RenderDRR, RenderDRRConfig
 
+OVERRIDE_HEIGHT = 11
+OVERRIDE_WIDTH = 13
+OVERRIDE_DELX = 1.5
+OVERRIDE_DELY = 1.75
+OVERRIDE_X0 = 2.0
+OVERRIDE_Y0 = -3.0
+
 
 def _make_image(fill: float = 1.0) -> tio.ScalarImage:
     tensor = torch.full((1, 2, 2, 2), fill_value=fill, dtype=torch.float32)
@@ -65,14 +72,14 @@ class TestRenderDRR:
     @pytest.mark.fast
     def test_raises_for_non_subject_input(self) -> None:
         transform = RenderDRR()
-        with pytest.raises(TypeError, match="torchio.Subject"):
+        with pytest.raises(TypeError, match=r"torchio\.Subject"):
             transform({"not": "a subject"})  # type: ignore[arg-type]
 
     @pytest.mark.fast
     def test_raises_when_required_diffdrr_keys_missing(self) -> None:
         subject = _make_subject(include_reorient=False)
         transform = RenderDRR()
-        with pytest.raises(KeyError, match="diffdrr.read"):
+        with pytest.raises(KeyError, match=r"diffdrr\.read"):
             transform(subject)
 
     @pytest.mark.fast
@@ -135,8 +142,38 @@ class TestRenderDRR:
         assert dummy is not None
         assert dummy.to_device == torch.device("cpu")
         rotations_arg, translations_arg, kwargs = dummy.call_args or (None, None, {})
-        assert rotations_arg is not None and translations_arg is not None
+        assert rotations_arg is not None
+        assert translations_arg is not None
         assert rotations_arg.device.type == "cpu"
         assert translations_arg.device.type == "cpu"
         assert kwargs.get("parameterization") == "euler_angles"
         assert kwargs.get("convention") == "ZXY"
+
+    @pytest.mark.fast
+    def test_subject_drr_config_overrides_base_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("tazotron.datasets.transforms.xray.DRR", _DummyDRR)
+        _DummyDRR.output = torch.tensor([[[[0.0, 1.0], [2.0, 3.0]]]], dtype=torch.float32)
+        subject = _make_subject(
+            rotations=torch.zeros((1, 3), dtype=torch.float32),
+            translations=torch.zeros((1, 3), dtype=torch.float32),
+        )
+        subject["drr_config"] = {
+            "height": OVERRIDE_HEIGHT,
+            "width": OVERRIDE_WIDTH,
+            "delx": OVERRIDE_DELX,
+            "dely": OVERRIDE_DELY,
+            "x0": OVERRIDE_X0,
+            "y0": OVERRIDE_Y0,
+        }
+
+        transform = RenderDRR({"device": "cpu", "height": 2, "delx": 1.0})
+        transform(subject)
+
+        dummy = _DummyDRR.last_instance
+        assert dummy is not None
+        assert dummy.kwargs["height"] == OVERRIDE_HEIGHT
+        assert dummy.kwargs["width"] == OVERRIDE_WIDTH
+        assert dummy.kwargs["delx"] == OVERRIDE_DELX
+        assert dummy.kwargs["dely"] == OVERRIDE_DELY
+        assert dummy.kwargs["x0"] == OVERRIDE_X0
+        assert dummy.kwargs["y0"] == OVERRIDE_Y0
