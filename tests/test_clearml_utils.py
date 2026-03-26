@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from pathlib import Path
 from typing import Any, ClassVar
+
+import pytest
 
 from tazotron.integrations import clearml
 
@@ -29,6 +33,8 @@ class FakeTask:
     """Task spy with minimal ClearML API surface used by helpers."""
 
     init_calls: ClassVar[list[dict[str, Any]]] = []
+    get_task_calls: ClassVar[list[dict[str, str]]] = []
+    next_get_task_result: ClassVar[FakeTask | None] = None
 
     @classmethod
     def init(
@@ -49,6 +55,11 @@ class FakeTask:
         )
         return cls()
 
+    @classmethod
+    def get_task(cls, project_name: str, task_name: str) -> FakeTask | None:
+        cls.get_task_calls.append({"project_name": project_name, "task_name": task_name})
+        return cls.next_get_task_result
+
     def __init__(self) -> None:
         self.logger = FakeLogger()
         self.upload_calls: list[dict[str, Any]] = []
@@ -56,6 +67,7 @@ class FakeTask:
         self.mark_completed_calls = 0
         self.close_calls = 0
         self.set_archived_calls: list[bool] = []
+        self.artifacts: dict[str, FakeArtifact] = {}
 
     def get_logger(self) -> FakeLogger:
         return self.logger
@@ -101,6 +113,25 @@ class FakeDataset:
 
     def get_local_copy(self) -> str:
         return "/tmp/fake-dataset"
+
+
+class FakeArtifact:
+    """Artifact spy for local-copy lookups."""
+
+    def __init__(self, local_copy: str | None) -> None:
+        self.local_copy = local_copy
+
+    def get_local_copy(self) -> str | None:
+        return self.local_copy
+
+
+def test_clearml_module_defers_sdk_resolution_until_needed() -> None:
+    sys.modules.pop("tazotron.integrations.clearml", None)
+
+    module = importlib.import_module("tazotron.integrations.clearml")
+
+    assert module._Dataset is None
+    assert module._Task is None
 
 
 def test_start_experiment_disabled_is_noop() -> None:
@@ -269,3 +300,47 @@ def test_get_dataset_path_and_best_fold(monkeypatch: Any) -> None:
     expected_best_fold_val_f1 = 0.79
     assert fold_index == expected_best_fold_index
     assert fold_payload["val"]["f1"] == expected_best_fold_val_f1
+
+
+def test_get_task_returns_matching_task(monkeypatch: Any) -> None:
+    FakeTask.get_task_calls = []
+    FakeTask.next_get_task_result = FakeTask()
+    monkeypatch.setattr(clearml, "_load_clearml", lambda: (FakeDataset, FakeTask))
+
+    task = clearml.get_task(project_name="Tazotron", task_name="runtime")
+
+    assert isinstance(task, FakeTask)
+    assert FakeTask.get_task_calls == [{"project_name": "Tazotron", "task_name": "runtime"}]
+
+
+def test_get_task_raises_when_missing(monkeypatch: Any) -> None:
+    FakeTask.get_task_calls = []
+    FakeTask.next_get_task_result = None
+    monkeypatch.setattr(clearml, "_load_clearml", lambda: (FakeDataset, FakeTask))
+
+    with pytest.raises(ValueError, match="was not found"):
+        clearml.get_task(project_name="Tazotron", task_name="missing")
+
+
+def test_get_task_artifact_path_returns_local_copy() -> None:
+    task = FakeTask()
+    task.artifacts["best_model_state_dict"] = FakeArtifact("/tmp/checkpoint.pt")
+
+    local_copy = clearml.get_task_artifact_path(task, alias="best_model_state_dict")
+
+    assert local_copy == Path("/tmp/checkpoint.pt")
+
+
+def test_get_task_artifact_path_raises_for_missing_alias() -> None:
+    task = FakeTask()
+
+    with pytest.raises(KeyError, match="was not found"):
+        clearml.get_task_artifact_path(task, alias="missing")
+
+
+def test_get_task_artifact_path_raises_for_missing_local_copy() -> None:
+    task = FakeTask()
+    task.artifacts["best_model_state_dict"] = FakeArtifact(None)
+
+    with pytest.raises(RuntimeError, match="did not provide a local copy"):
+        clearml.get_task_artifact_path(task, alias="best_model_state_dict")

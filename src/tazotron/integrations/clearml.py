@@ -10,12 +10,8 @@ if TYPE_CHECKING:
     from clearml import Task
     from clearml.logger import Logger
 
-try:
-    from clearml import Dataset as _Dataset
-    from clearml import Task as _Task
-except ImportError:
-    _Dataset = None
-    _Task = None
+_Dataset: Any | None = None
+_Task: Any | None = None
 
 # Master switch for all ClearML side effects from this module.
 CLEARML_ENABLED: bool = True
@@ -48,9 +44,17 @@ def _resolve_enabled(enabled: bool | None = None) -> bool:  # noqa: FBT001
 
 def _load_clearml() -> tuple[Any, Any]:
     """Resolve cached ClearML classes or raise a clear error if package is unavailable."""
+    global _Dataset, _Task
+
     if _Dataset is None or _Task is None:
-        msg = "clearml package is required when CLEARML_ENABLED=True"
-        raise ImportError(msg)
+        try:
+            from clearml import Dataset as dataset_cls
+            from clearml import Task as task_cls
+        except ImportError as error:
+            msg = "clearml package is required when CLEARML_ENABLED=True"
+            raise ImportError(msg) from error
+        _Dataset = dataset_cls
+        _Task = task_cls
     return _Dataset, _Task
 
 
@@ -233,6 +237,33 @@ def get_dataset_path(dataset_project: str, dataset_name: str) -> Path:
     dataset_cls, _ = _load_clearml()
     dataset = dataset_cls.get(dataset_project=dataset_project, dataset_name=dataset_name)
     return Path(dataset.get_local_copy())
+
+
+def get_task(project_name: str, task_name: str) -> Any:
+    """Resolve a ClearML task by project and task name."""
+    _, task_cls = _load_clearml()
+    task = task_cls.get_task(project_name=project_name, task_name=task_name)
+    if task is None:
+        msg = f"ClearML task '{task_name}' was not found in project '{project_name}'"
+        raise ValueError(msg)
+    return task
+
+
+def get_task_artifact_path(task: Task | Any, alias: str) -> Path:
+    """Return a local path for a task artifact."""
+    artifacts = getattr(task, "artifacts", None)
+    if not isinstance(artifacts, dict):
+        msg = "ClearML task does not expose an artifacts dictionary"
+        raise ValueError(msg)
+    artifact = artifacts.get(alias)
+    if artifact is None:
+        msg = f"ClearML artifact '{alias}' was not found for task"
+        raise KeyError(msg)
+    local_copy = artifact.get_local_copy()
+    if local_copy is None:
+        msg = f"ClearML artifact '{alias}' did not provide a local copy"
+        raise RuntimeError(msg)
+    return Path(local_copy)
 
 
 def upload_artifact(task: Task | None, alias: str, path: Path, *, enabled: bool | None = None) -> None:
