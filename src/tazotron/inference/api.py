@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import uvicorn
 from fastapi import Depends, FastAPI
+from fastapi.responses import Response
 
 from tazotron.inference.schemas import (
     ClassificationRequest,
     ClassificationResponse,
+    CtToXrayRequest,
     ModelMetricsResponse,
     ModelResponse,
 )
@@ -51,6 +53,16 @@ def classify(
 ) -> ClassificationResponse:
     """Classify an X-ray image from a base64 payload."""
     return inference_facade.classify(request)
+
+
+@app.post("/ct-to-xray", response_class=Response)
+def ct_to_xray(
+    request: CtToXrayRequest,
+    inference_facade: InferenceFacade = Depends(get_inference_facade),
+) -> Response:
+    """Render a synthetic X-ray image from an uploaded CT study."""
+    xray_bytes = inference_facade.generate_xray_from_ct_request(request)
+    return Response(content=xray_bytes, media_type="image/png")
 
 
 def run() -> None:

@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import importlib
 import sys
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
+import torchio as tio
+from fastapi import HTTPException
+from PIL import Image
 
 from tazotron.inference.model import build_binary_model
 from tazotron.inference.schemas import ClassificationRequest
-from tazotron.inference.service import InferenceFacade, RegisteredModel, RegisteredModelMetadata
+from tazotron.inference.service import CtSegmentationInput, InferenceFacade, RegisteredModel, RegisteredModelMetadata
 from tazotron.inference.settings import InferenceSettings
 
 
@@ -41,6 +45,53 @@ def _write_checkpoint(path: Path) -> Path:
     }
     torch.save(checkpoint, path)
     return path
+
+
+class _DummyDRR:
+    def __init__(self, subject: tio.Subject, **_: object) -> None:
+        self.subject = subject
+
+    def to(self, device: torch.device | str) -> _DummyDRR:
+        del device
+        return self
+
+    def __call__(self, rotations: torch.Tensor, translations: torch.Tensor, **_: object) -> torch.Tensor:
+        del rotations, translations
+        volume = self.subject["volume"].data
+        projection = volume[0].sum(dim=0, keepdim=True).unsqueeze(0)
+        if float(projection.max().item() - projection.min().item()) < 1e-6:
+            projection = projection.clone()
+            projection[..., 0, 0] = 1.0
+        return projection
+
+
+def _serialize_image(path: Path, tensor: torch.Tensor, *, label: bool = False) -> bytes:
+    image_cls = tio.LabelMap if label else tio.ScalarImage
+    image_cls(tensor=tensor, affine=torch.eye(4)).save(path)
+    return path.read_bytes()
+
+
+def _make_ct_to_xray_payload(tmp_path: Path) -> tuple[bytes, list[CtSegmentationInput]]:
+    ct_tensor = torch.full((1, 8, 8, 8), fill_value=100.0, dtype=torch.float32)
+    left_mask = torch.zeros_like(ct_tensor, dtype=torch.int16)
+    right_mask = torch.zeros_like(ct_tensor, dtype=torch.int16)
+    left_mask[0, 1:6, 1:6, 1:6] = 1
+    right_mask[0, 2:7, 2:7, 2:7] = 1
+
+    ct_bytes = _serialize_image(tmp_path / "scan.nii.gz", ct_tensor)
+    segmentations = [
+        CtSegmentationInput(
+            type="femur_left",
+            file_name="femur-left.nrrd",
+            file_bytes=_serialize_image(tmp_path / "femur-left.nrrd", left_mask, label=True),
+        ),
+        CtSegmentationInput(
+            type="femur_right",
+            file_name="femur-right.nrrd",
+            file_bytes=_serialize_image(tmp_path / "femur-right.nrrd", right_mask, label=True),
+        ),
+    ]
+    return ct_bytes, segmentations
 
 
 class TestInferenceFacade:
@@ -165,3 +216,33 @@ class TestInferenceFacade:
         facade.classify(request)
 
         assert calls["count"] == 1
+
+    @pytest.mark.fast
+    def test_generate_xray_from_ct_returns_png(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        settings = InferenceSettings(model_external_id="model-v1", model_device="cpu")
+        facade = InferenceFacade(settings)
+        ct_bytes, segmentations = _make_ct_to_xray_payload(tmp_path)
+
+        monkeypatch.setattr("tazotron.datasets.transforms.xray.DRR", _DummyDRR)
+
+        xray_bytes = facade.generate_xray_from_ct(ct_bytes, segmentations)
+
+        decoded = Image.open(BytesIO(xray_bytes))
+        assert decoded.format == "PNG"
+        assert decoded.size == (8, 8)
+
+    @pytest.mark.fast
+    def test_generate_xray_from_ct_rejects_missing_required_segmentations(self, tmp_path: Path) -> None:
+        settings = InferenceSettings(model_external_id="model-v1", model_device="cpu")
+        facade = InferenceFacade(settings)
+        ct_bytes, segmentations = _make_ct_to_xray_payload(tmp_path)
+
+        with pytest.raises(HTTPException) as exc_info:
+            facade.generate_xray_from_ct(ct_bytes, segmentations[:1])
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "CT -> Xray requires segmentations: femur_right"

@@ -6,11 +6,17 @@ from base64 import b64decode
 from binascii import Error as BinasciiError
 from dataclasses import dataclass
 from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from fastapi import HTTPException, status
+from PIL import Image
+import torch
 
+from tazotron.datasets.ct import CTDataset
+from tazotron.datasets.transforms.femoral_head import AddFemoralHeadMasks
 from tazotron.inference.model import (
     BinaryImageClassifier,
     build_binary_model,
@@ -22,10 +28,35 @@ from tazotron.inference.model import (
 from tazotron.inference.schemas import (
     ClassificationRequest,
     ClassificationResponse,
+    CtToXrayRequest,
     ModelMetricsResponse,
     ModelResponse,
 )
 from tazotron.inference.settings import InferenceSettings, get_settings
+from tazotron.datasets.transforms.xray import RenderDRR
+from tazotron.xray_generation import AUTOPOSE_MODE, apply_framing, squeeze_xray_tensor
+
+TEMP_CT_CASE_ID = "case-001"
+TEMP_CT_FILE_NAME = "ct.nii.gz"
+SEGMENTATION_FILE_NAMES = {
+    "femur_left": "femur_left.nii.gz.seg.nrrd",
+    "femur_right": "femur_right.nii.gz.seg.nrrd",
+}
+SEGMENTATION_TYPE_ALIASES = {
+    "femur_left": "femur_left",
+    "label_femur_left": "femur_left",
+    "femur_right": "femur_right",
+    "label_femur_right": "femur_right",
+}
+
+
+@dataclass(slots=True, frozen=True)
+class CtSegmentationInput:
+    """A CT segmentation payload accepted by the inference HTTP API."""
+
+    type: str
+    file_name: str
+    file_bytes: bytes
 
 
 @dataclass(slots=True, frozen=True)
@@ -117,6 +148,56 @@ class InferenceFacade:
             errorMessage=None,
         )
 
+    def generate_xray_from_ct_request(self, request: CtToXrayRequest) -> bytes:
+        ct_bytes = self._decode_base64_payload(request.ctFileBase64, "ctFileBase64")
+        segmentations = [
+            CtSegmentationInput(
+                type=segmentation.type,
+                file_name="",
+                file_bytes=self._decode_base64_payload(
+                    segmentation.fileBase64,
+                    f"segmentations[{index}].fileBase64",
+                ),
+            )
+            for index, segmentation in enumerate(request.segmentations)
+        ]
+        return self.generate_xray_from_ct(ct_bytes, segmentations)
+
+    def generate_xray_from_ct(self, ct_bytes: bytes, segmentations: list[CtSegmentationInput]) -> bytes:
+        if not ct_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ctFile must not be empty",
+            )
+
+        normalized_segmentations = self._normalize_ct_segmentations(segmentations)
+        try:
+            with TemporaryDirectory(prefix="tazotron-ct-to-xray-") as temp_dir:
+                case_dir = Path(temp_dir) / TEMP_CT_CASE_ID
+                case_dir.mkdir(parents=True, exist_ok=True)
+                (case_dir / TEMP_CT_FILE_NAME).write_bytes(ct_bytes)
+                for segmentation_type, segmentation in normalized_segmentations.items():
+                    (case_dir / SEGMENTATION_FILE_NAMES[segmentation_type]).write_bytes(segmentation.file_bytes)
+
+                femoral_head_masks = AddFemoralHeadMasks()
+                render = RenderDRR({"device": self.settings.model_device})
+
+                def pipeline(subject):
+                    subject = femoral_head_masks(subject)
+                    subject = apply_framing(subject, framing_mode=AUTOPOSE_MODE)
+                    return render(subject)
+
+                dataset = CTDataset(Path(temp_dir), transform=pipeline)
+                subject = dataset[0]
+                return self._encode_png(subject["xray"])
+        except HTTPException:
+            raise
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
     def _get_registered_model(self, external_id: str) -> RegisteredModel:
         self._ensure_known_model(external_id)
         if self._registered_model is None:
@@ -180,19 +261,66 @@ class InferenceFacade:
         )
 
     def _decode_image(self, image_base64: str) -> bytes:
+        return self._decode_base64_payload(image_base64, "imageBase64")
+
+    def _decode_base64_payload(self, payload: str, field_name: str) -> bytes:
         try:
-            image_bytes = b64decode(image_base64, validate=True)
+            decoded_bytes = b64decode(payload, validate=True)
         except BinasciiError as error:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="imageBase64 must contain a valid base64 payload",
+                detail=f"{field_name} must contain a valid base64 payload",
             ) from error
-        if not image_bytes:
+        if not decoded_bytes:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="imageBase64 must not decode to an empty payload",
+                detail=f"{field_name} must not decode to an empty payload",
             )
-        return image_bytes
+        return decoded_bytes
+
+    def _normalize_ct_segmentations(
+        self,
+        segmentations: list[CtSegmentationInput],
+    ) -> dict[str, CtSegmentationInput]:
+        normalized: dict[str, CtSegmentationInput] = {}
+        for segmentation in segmentations:
+            raw_type = segmentation.type.strip().lower()
+            if raw_type not in SEGMENTATION_TYPE_ALIASES:
+                continue
+            if not segmentation.file_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Segmentation '{segmentation.type}' must not be empty",
+                )
+
+            normalized_type = SEGMENTATION_TYPE_ALIASES[raw_type]
+            if normalized_type in normalized:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Duplicate segmentation type '{segmentation.type}'",
+                )
+            normalized[normalized_type] = segmentation
+
+        missing_types = [segmentation_type for segmentation_type in SEGMENTATION_FILE_NAMES if segmentation_type not in normalized]
+        if missing_types:
+            missing = ", ".join(missing_types)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"CT -> Xray requires segmentations: {missing}",
+            )
+        return normalized
+
+    def _encode_png(self, tensor) -> bytes:
+        image = torch.nan_to_num(squeeze_xray_tensor(tensor))
+        image -= image.min()
+        max_value = float(image.max().item())
+        if max_value > 0.0:
+            image = image / max_value
+
+        image_bytes = (image * 255.0).round().clamp(0, 255).to(torch.uint8).numpy()
+        buffer = BytesIO()
+        Image.fromarray(image_bytes).save(buffer, format="PNG")
+        return buffer.getvalue()
 
     def _service_unavailable(self, message: str) -> HTTPException:
         return HTTPException(

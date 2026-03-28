@@ -39,6 +39,13 @@ def _make_image_base64() -> str:
     return b64encode(buffer.getvalue()).decode("ascii")
 
 
+def _make_png_bytes() -> bytes:
+    image = Image.new("L", (4, 4), color=128)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     settings = InferenceSettings(
@@ -72,6 +79,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     )
     monkeypatch.setattr(facade, "_load_model_metadata", lambda: metadata)
     monkeypatch.setattr(facade, "_build_registered_model", lambda _: registered_model)
+    monkeypatch.setattr(facade, "generate_xray_from_ct_request", lambda *_: _make_png_bytes())
     app.dependency_overrides[get_inference_facade] = lambda: facade
     with TestClient(app) as test_client:
         yield test_client
@@ -156,6 +164,45 @@ class TestInferenceApi:
 
         assert response.status_code == 400
         assert response.json()["detail"] == "imageBase64 must decode to a valid image"
+
+    @pytest.mark.fast
+    def test_ct_to_xray_endpoint(self, client: TestClient) -> None:
+        response = client.post(
+            "/ct-to-xray",
+            json={
+                "ctFileBase64": b64encode(b"ct-bytes").decode("ascii"),
+                "segmentations": [
+                    {"type": "femur_left", "fileBase64": b64encode(b"left").decode("ascii")},
+                    {"type": "femur_right", "fileBase64": b64encode(b"right").decode("ascii")},
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert response.content == _make_png_bytes()
+
+    @pytest.mark.fast
+    def test_ct_to_xray_rejects_invalid_base64(self) -> None:
+        facade = InferenceFacade(InferenceSettings(model_external_id="model-v1"))
+        app.dependency_overrides[get_inference_facade] = lambda: facade
+        try:
+            with TestClient(app) as test_client:
+                response = test_client.post(
+                    "/ct-to-xray",
+                    json={
+                        "ctFileBase64": "!!!",
+                        "segmentations": [
+                            {"type": "femur_left", "fileBase64": b64encode(b"left").decode("ascii")},
+                            {"type": "femur_right", "fileBase64": b64encode(b"right").decode("ascii")},
+                        ],
+                    },
+                )
+        finally:
+            app.dependency_overrides.clear()
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "ctFileBase64 must contain a valid base64 payload"
 
     @pytest.mark.fast
     def test_models_returns_503_when_model_loading_fails(self) -> None:
