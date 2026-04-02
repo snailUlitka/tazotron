@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -61,3 +63,47 @@ class CtToXrayRequest(BaseModel):
 
     ctFileBase64: str = Field(min_length=1)
     segmentations: list[CtToXraySegmentationRequest] = Field(min_length=1)
+
+
+class TrainableArchitectureResponse(BaseModel):
+    """One architecture available for admin-triggered training."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    name: str
+    description: str
+    requiresManualWeights: bool
+
+
+class TrainingJobStartRequest(BaseModel):
+    """Request body for starting a training job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    architectureKey: str = Field(min_length=1)
+    datasetName: str = Field(min_length=1)
+    learningRate: float = Field(gt=0)
+    epochs: int = Field(ge=1)
+    batchSize: int = Field(ge=1)
+
+
+class TrainingJobResponse(BaseModel):
+    """Current or historical status for one training job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    jobId: str
+    status: str
+    datasetName: str
+    architectureKey: str
+    learningRate: float
+    epochs: int
+    batchSize: int
+    currentEpoch: int | None = None
+    totalEpochs: int | None = None
+    progressMessage: str | None = None
+    modelExternalId: str | None = None
+    errorMessage: str | None = None
+    startedAt: datetime
+    finishedAt: datetime | None = None

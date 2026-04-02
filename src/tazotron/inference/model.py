@@ -13,8 +13,10 @@ from torch import nn
 from torchvision import transforms as T
 
 from tazotron.inference.settings import InferenceSettings
+from tazotron.nn import ResNet18, ResNet50
 
 EPS = 1e-6
+DEFAULT_LOADER_KIND = "timm"
 
 
 def minmax_normalize(tensor: torch.Tensor) -> torch.Tensor:
@@ -67,14 +69,26 @@ class BinaryImagePreprocessor:
         return self.transform(normalized).unsqueeze(0)
 
 
-def build_binary_model(model_name: str, num_classes: int) -> nn.Module:
-    """Create a timm model with a binary classifier head."""
-    model = timm.create_model(model_name, pretrained=False)
-    if not hasattr(model, "reset_classifier"):
-        msg = f"{model_name} does not expose reset_classifier()."
+def build_binary_model(model_name: str, num_classes: int, *, loader_kind: str = DEFAULT_LOADER_KIND) -> nn.Module:
+    """Create a model compatible with the saved checkpoint loader kind."""
+    if loader_kind == "timm":
+        model = timm.create_model(model_name, pretrained=False)
+        if not hasattr(model, "reset_classifier"):
+            msg = f"{model_name} does not expose reset_classifier()."
+            raise ValueError(msg)
+        model.reset_classifier(num_classes=num_classes)
+        return model
+
+    if loader_kind == "tazotron_custom":
+        if model_name == "resnet18":
+            return ResNet18(num_classes=num_classes)
+        if model_name == "resnet50":
+            return ResNet50(num_classes=num_classes)
+        msg = f"Unsupported custom model '{model_name}'"
         raise ValueError(msg)
-    model.reset_classifier(num_classes=num_classes)
-    return model
+
+    msg = f"Unsupported model loader kind '{loader_kind}'"
+    raise ValueError(msg)
 
 
 def resolve_model_name(settings: InferenceSettings, checkpoint: object) -> str:
@@ -86,6 +100,17 @@ def resolve_model_name(settings: InferenceSettings, checkpoint: object) -> str:
             if isinstance(checkpoint_model_name, str) and checkpoint_model_name:
                 return checkpoint_model_name
     return settings.model_name
+
+
+def resolve_loader_kind(checkpoint: object) -> str:
+    """Pick the runtime loader kind from checkpoint config."""
+    if isinstance(checkpoint, dict):
+        config = checkpoint.get("config")
+        if isinstance(config, dict):
+            checkpoint_loader_kind = config.get("loader_kind")
+            if isinstance(checkpoint_loader_kind, str) and checkpoint_loader_kind:
+                return checkpoint_loader_kind
+    return DEFAULT_LOADER_KIND
 
 
 def extract_model_state_dict(checkpoint: object) -> dict[str, torch.Tensor]:

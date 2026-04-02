@@ -116,13 +116,14 @@ class TestInferenceFacade:
 
         monkeypatch.setattr(facade, "_get_clearml_client", lambda: clearml_client)
 
-        model = facade._load_model_metadata()
+        model = facade._load_configured_model_metadata()
 
         assert model.external_id == "model-v1"
         assert model.name == settings.model_display_name
         assert model.version == settings.clearml_task_name
         assert model.accuracy == pytest.approx(0.85)
         assert model.loss == pytest.approx(0.34)
+        assert model.checkpoint_path == checkpoint_path
 
     @pytest.mark.fast
     def test_list_models_uses_static_configuration(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,7 +133,7 @@ class TestInferenceFacade:
         def _unexpected_load() -> RegisteredModelMetadata:
             raise AssertionError("metadata loading should not happen for /models")
 
-        monkeypatch.setattr(facade, "_load_model_metadata", _unexpected_load)
+        monkeypatch.setattr(facade, "_load_configured_model_metadata", _unexpected_load)
 
         response = facade.list_models()
 
@@ -148,17 +149,19 @@ class TestInferenceFacade:
     def test_get_metrics_avoids_building_classifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
         settings = InferenceSettings(model_external_id="model-v1")
         facade = InferenceFacade(settings)
+        checkpoint_path = Path("checkpoint.pt")
         metadata = RegisteredModelMetadata(
             external_id="model-v1",
             name="Model V1",
             version="v1",
             accuracy=0.85,
             loss=0.34,
-            checkpoint={"model_state_dict": {}},
+            checkpoint_path=checkpoint_path,
             resolved_model_name="resnet18",
+            loader_kind="timm",
         )
 
-        monkeypatch.setattr(facade, "_load_model_metadata", lambda: metadata)
+        monkeypatch.setattr(facade, "_load_configured_model_metadata", lambda: metadata)
 
         def _unexpected_build(_: RegisteredModelMetadata) -> RegisteredModel:
             raise AssertionError("classifier should not be built for /metrics")
@@ -178,6 +181,7 @@ class TestInferenceFacade:
         settings = InferenceSettings(model_external_id="model-v1")
         facade = InferenceFacade(settings)
         calls = {"count": 0}
+        checkpoint_path = Path("checkpoint.pt")
 
         metadata = RegisteredModelMetadata(
             external_id="model-v1",
@@ -185,8 +189,9 @@ class TestInferenceFacade:
             version="v1",
             accuracy=0.5,
             loss=0.7,
-            checkpoint={"model_state_dict": {}},
+            checkpoint_path=checkpoint_path,
             resolved_model_name="resnet18",
+            loader_kind="timm",
         )
 
         def _fake_build(_: RegisteredModelMetadata) -> Any:
@@ -208,7 +213,7 @@ class TestInferenceFacade:
                 classifier=_Classifier(),
             )
 
-        monkeypatch.setattr(facade, "_load_model_metadata", lambda: metadata)
+        monkeypatch.setattr(facade, "_load_configured_model_metadata", lambda: metadata)
         monkeypatch.setattr(facade, "_build_registered_model", _fake_build)
 
         request = ClassificationRequest(modelExternalId="model-v1", imageBase64="ZGF0YQ==")

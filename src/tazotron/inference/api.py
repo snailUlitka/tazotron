@@ -12,6 +12,9 @@ from tazotron.inference.schemas import (
     CtToXrayRequest,
     ModelMetricsResponse,
     ModelResponse,
+    TrainableArchitectureResponse,
+    TrainingJobResponse,
+    TrainingJobStartRequest,
 )
 from tazotron.inference.service import InferenceFacade, get_inference_facade
 from tazotron.inference.settings import get_settings
@@ -63,6 +66,40 @@ def ct_to_xray(
     """Render a synthetic X-ray image from an uploaded CT study."""
     xray_bytes = inference_facade.generate_xray_from_ct_request(request)
     return Response(content=xray_bytes, media_type="image/png")
+
+
+@app.get("/training/architectures", response_model=list[TrainableArchitectureResponse])
+def list_trainable_architectures(
+    inference_facade: InferenceFacade = Depends(get_inference_facade),
+) -> list[TrainableArchitectureResponse]:
+    """List architectures available for admin-triggered training."""
+    return inference_facade.list_trainable_architectures()
+
+
+@app.post("/training/jobs", response_model=TrainingJobResponse)
+def start_training_job(
+    request: TrainingJobStartRequest,
+    inference_facade: InferenceFacade = Depends(get_inference_facade),
+) -> TrainingJobResponse:
+    """Start an asynchronous training job."""
+    return inference_facade.start_training_job(request)
+
+
+@app.get("/training/jobs/current", response_model=TrainingJobResponse)
+def get_current_training_job(
+    inference_facade: InferenceFacade = Depends(get_inference_facade),
+) -> TrainingJobResponse:
+    """Return the currently active training job."""
+    return inference_facade.get_current_training_job()
+
+
+@app.get("/training/jobs/{job_id}", response_model=TrainingJobResponse)
+def get_training_job(
+    job_id: str,
+    inference_facade: InferenceFacade = Depends(get_inference_facade),
+) -> TrainingJobResponse:
+    """Return one training job by id."""
+    return inference_facade.get_training_job(job_id)
 
 
 def run() -> None:

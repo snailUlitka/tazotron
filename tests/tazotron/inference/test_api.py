@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from base64 import b64encode
+from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 import torch
@@ -11,6 +13,7 @@ from PIL import Image
 
 from tazotron.inference.api import app
 from tazotron.inference.model import BinaryImageClassifier
+from tazotron.inference.schemas import TrainingJobResponse
 from tazotron.inference.service import (
     InferenceFacade,
     RegisteredModel,
@@ -74,12 +77,85 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
         version="test-version",
         accuracy=0.85,
         loss=0.34,
-        checkpoint={"model_state_dict": {}},
+        checkpoint_path=Path("checkpoint.pt"),
         resolved_model_name="resnet18",
+        loader_kind="timm",
     )
-    monkeypatch.setattr(facade, "_load_model_metadata", lambda: metadata)
+    monkeypatch.setattr(facade, "_load_configured_model_metadata", lambda: metadata)
     monkeypatch.setattr(facade, "_build_registered_model", lambda _: registered_model)
     monkeypatch.setattr(facade, "generate_xray_from_ct_request", lambda *_: _make_png_bytes())
+    monkeypatch.setattr(
+        facade.training_jobs,
+        "list_architectures",
+        lambda: [
+            {
+                "key": "resnet18",
+                "name": "ResNet18",
+                "description": "Compact classifier",
+                "requiresManualWeights": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        facade.training_jobs,
+        "start_job",
+        lambda *_: TrainingJobResponse(
+            jobId="job-001",
+            status="queued",
+            datasetName="dataset-alpha",
+            architectureKey="resnet18",
+            learningRate=0.001,
+            epochs=5,
+            batchSize=4,
+            currentEpoch=0,
+            totalEpochs=5,
+            progressMessage="Queued",
+            modelExternalId=None,
+            errorMessage=None,
+            startedAt=datetime.fromisoformat("2026-04-02T12:00:00+00:00"),
+            finishedAt=None,
+        ),
+    )
+    monkeypatch.setattr(
+        facade.training_jobs,
+        "get_current_job",
+        lambda: TrainingJobResponse(
+            jobId="job-001",
+            status="running",
+            datasetName="dataset-alpha",
+            architectureKey="resnet18",
+            learningRate=0.001,
+            epochs=5,
+            batchSize=4,
+            currentEpoch=2,
+            totalEpochs=5,
+            progressMessage="Epoch 2/5",
+            modelExternalId=None,
+            errorMessage=None,
+            startedAt=datetime.fromisoformat("2026-04-02T12:00:00+00:00"),
+            finishedAt=None,
+        ),
+    )
+    monkeypatch.setattr(
+        facade.training_jobs,
+        "get_job",
+        lambda *_: TrainingJobResponse(
+            jobId="job-001",
+            status="running",
+            datasetName="dataset-alpha",
+            architectureKey="resnet18",
+            learningRate=0.001,
+            epochs=5,
+            batchSize=4,
+            currentEpoch=2,
+            totalEpochs=5,
+            progressMessage="Epoch 2/5",
+            modelExternalId=None,
+            errorMessage=None,
+            startedAt=datetime.fromisoformat("2026-04-02T12:00:00+00:00"),
+            finishedAt=None,
+        ),
+    )
     app.dependency_overrides[get_inference_facade] = lambda: facade
     with TestClient(app) as test_client:
         yield test_client
@@ -205,6 +281,44 @@ class TestInferenceApi:
         assert response.json()["detail"] == "ctFileBase64 must contain a valid base64 payload"
 
     @pytest.mark.fast
+    def test_training_architectures_endpoint(self, client: TestClient) -> None:
+        response = client.get("/training/architectures")
+
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "key": "resnet18",
+                "name": "ResNet18",
+                "description": "Compact classifier",
+                "requiresManualWeights": False,
+            }
+        ]
+
+    @pytest.mark.fast
+    def test_start_training_job_endpoint(self, client: TestClient) -> None:
+        response = client.post(
+            "/training/jobs",
+            json={
+                "architectureKey": "resnet18",
+                "datasetName": "dataset-alpha",
+                "learningRate": 0.001,
+                "epochs": 5,
+                "batchSize": 4,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["jobId"] == "job-001"
+
+    @pytest.mark.fast
+    def test_current_training_job_endpoint(self, client: TestClient) -> None:
+        response = client.get("/training/jobs/current")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "running"
+        assert response.json()["currentEpoch"] == 2
+
+    @pytest.mark.fast
     def test_models_returns_503_when_model_loading_fails(self) -> None:
         settings = InferenceSettings(model_external_id="model-v1")
         facade = InferenceFacade(settings)
@@ -214,7 +328,7 @@ class TestInferenceApi:
 
         app.dependency_overrides[get_inference_facade] = lambda: facade
         try:
-            facade._load_model_metadata = _boom  # type: ignore[method-assign]
+            facade._load_configured_model_metadata = _boom  # type: ignore[method-assign]
             with TestClient(app) as test_client:
                 models_response = test_client.get("/models")
                 response = test_client.get("/models/model-v1/metrics")

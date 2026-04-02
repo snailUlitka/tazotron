@@ -36,6 +36,22 @@ class InferenceSettings(BaseSettings):
     clearml_artifact_name: str = "best_model_state_dict"
     datasets_root_path: Path = Path("../.data")
 
+    @property
+    def data_root_path(self) -> Path:
+        return self.datasets_root_path
+
+    @property
+    def datasets_catalog_path(self) -> Path:
+        return self.data_root_path / "datasets"
+
+    @property
+    def models_root_path(self) -> Path:
+        return self.data_root_path / "models"
+
+    @property
+    def weights_root_path(self) -> Path:
+        return self.data_root_path / "weights"
+
 @lru_cache(maxsize=1)
 def get_settings() -> InferenceSettings:
     """Return cached service settings."""

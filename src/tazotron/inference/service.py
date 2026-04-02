@@ -17,12 +17,14 @@ import torch
 
 from tazotron.datasets.ct import CTDataset
 from tazotron.datasets.transforms.femoral_head import AddFemoralHeadMasks
+from tazotron.datasets.transforms.xray import RenderDRR
 from tazotron.inference.model import (
     BinaryImageClassifier,
     build_binary_model,
     extract_metrics,
     extract_model_state_dict,
     load_checkpoint,
+    resolve_loader_kind,
     resolve_model_name,
 )
 from tazotron.inference.schemas import (
@@ -31,9 +33,16 @@ from tazotron.inference.schemas import (
     CtToXrayRequest,
     ModelMetricsResponse,
     ModelResponse,
+    TrainableArchitectureResponse,
+    TrainingJobResponse,
+    TrainingJobStartRequest,
 )
 from tazotron.inference.settings import InferenceSettings, get_settings
-from tazotron.datasets.transforms.xray import RenderDRR
+from tazotron.inference.training import (
+    LocalModelRecord,
+    TrainingJobManager,
+    load_local_models,
+)
 from tazotron.xray_generation import AUTOPOSE_MODE, apply_framing, squeeze_xray_tensor
 
 TEMP_CT_CASE_ID = "case-001"
@@ -70,32 +79,19 @@ class RegisteredModel:
     loss: float
     classifier: BinaryImageClassifier
 
-    def to_model_response(self) -> ModelResponse:
-        return ModelResponse(
-            externalId=self.external_id,
-            name=self.name,
-            version=self.version,
-        )
-
-    def to_metrics_response(self) -> ModelMetricsResponse:
-        return ModelMetricsResponse(
-            externalId=self.external_id,
-            accuracy=self.accuracy,
-            loss=self.loss,
-        )
-
 
 @dataclass(slots=True, frozen=True)
 class RegisteredModelMetadata:
-    """Checkpoint-backed metadata that does not require a live classifier."""
+    """Model metadata that does not require a live classifier."""
 
     external_id: str
     name: str
     version: str
     accuracy: float
     loss: float
-    checkpoint: dict[str, Any]
+    checkpoint_path: Path
     resolved_model_name: str
+    loader_kind: str
 
     def to_model_response(self) -> ModelResponse:
         return ModelResponse(
@@ -122,11 +118,22 @@ class InferenceFacade:
             name=settings.model_display_name,
             version=self._resolve_version(),
         )
-        self._model_metadata: RegisteredModelMetadata | None = None
-        self._registered_model: RegisteredModel | None = None
+        self._configured_model_metadata: RegisteredModelMetadata | None = None
+        self._registered_models: dict[str, RegisteredModel] = {}
+        self.training_jobs = TrainingJobManager(settings)
 
     def list_models(self) -> list[ModelResponse]:
-        return [self._configured_model]
+        models = [self._configured_model]
+        local_models = load_local_models(self.settings)
+        models.extend(
+            ModelResponse(
+                externalId=record.external_id,
+                name=record.name,
+                version=record.version,
+            )
+            for record in local_models.values()
+        )
+        return models
 
     def get_metrics(self, external_id: str) -> ModelMetricsResponse:
         return self._get_model_metadata(external_id).to_metrics_response()
@@ -147,6 +154,18 @@ class InferenceFacade:
             probability=probability,
             errorMessage=None,
         )
+
+    def list_trainable_architectures(self) -> list[TrainableArchitectureResponse]:
+        return self.training_jobs.list_architectures()
+
+    def start_training_job(self, request: TrainingJobStartRequest) -> TrainingJobResponse:
+        return self.training_jobs.start_job(request)
+
+    def get_current_training_job(self) -> TrainingJobResponse:
+        return self.training_jobs.get_current_job()
+
+    def get_training_job(self, job_id: str) -> TrainingJobResponse:
+        return self.training_jobs.get_job(job_id)
 
     def generate_xray_from_ct_request(self, request: CtToXrayRequest) -> bytes:
         ct_bytes = self._decode_base64_payload(request.ctFileBase64, "ctFileBase64")
@@ -199,19 +218,34 @@ class InferenceFacade:
             ) from error
 
     def _get_registered_model(self, external_id: str) -> RegisteredModel:
-        self._ensure_known_model(external_id)
-        if self._registered_model is None:
-            metadata = self._get_model_metadata(external_id)
-            self._registered_model = self._build_registered_model(metadata)
-        return self._registered_model
+        cached_model = self._registered_models.get(external_id)
+        if cached_model is not None:
+            return cached_model
+
+        metadata = self._get_model_metadata(external_id)
+        registered_model = self._build_registered_model(metadata)
+        self._registered_models[external_id] = registered_model
+        return registered_model
 
     def _get_model_metadata(self, external_id: str) -> RegisteredModelMetadata:
-        self._ensure_known_model(external_id)
-        if self._model_metadata is None:
-            self._model_metadata = self._load_model_metadata()
-        return self._model_metadata
+        if external_id == self.settings.model_external_id:
+            if self._configured_model_metadata is None:
+                self._configured_model_metadata = self._load_configured_model_metadata()
+            return self._configured_model_metadata
 
-    def _load_model_metadata(self) -> RegisteredModelMetadata:
+        record = self._get_local_model_record(external_id)
+        return RegisteredModelMetadata(
+            external_id=record.external_id,
+            name=record.name,
+            version=record.version,
+            accuracy=record.accuracy,
+            loss=record.loss,
+            checkpoint_path=record.checkpoint_path,
+            resolved_model_name=record.model_name,
+            loader_kind=record.loader_kind,
+        )
+
+    def _load_configured_model_metadata(self) -> RegisteredModelMetadata:
         try:
             clearml_client = self._get_clearml_client()
             task = clearml_client.get_task(
@@ -225,6 +259,8 @@ class InferenceFacade:
             checkpoint = load_checkpoint(Path(checkpoint_path))
             accuracy, loss = extract_metrics(checkpoint)
             version = self._resolve_version()
+            resolved_model_name = resolve_model_name(self.settings, checkpoint)
+            loader_kind = resolve_loader_kind(checkpoint)
         except ImportError as error:
             raise self._service_unavailable("clearml package is not available") from error
         except FileNotFoundError as error:
@@ -238,16 +274,22 @@ class InferenceFacade:
             version=version,
             accuracy=accuracy,
             loss=loss,
-            checkpoint=checkpoint,
-            resolved_model_name=resolve_model_name(self.settings, checkpoint),
+            checkpoint_path=Path(checkpoint_path),
+            resolved_model_name=resolved_model_name,
+            loader_kind=loader_kind,
         )
 
     def _build_registered_model(self, metadata: RegisteredModelMetadata) -> RegisteredModel:
         try:
-            model = build_binary_model(metadata.resolved_model_name, self.settings.model_num_classes)
-            state_dict = extract_model_state_dict(metadata.checkpoint)
+            checkpoint = load_checkpoint(metadata.checkpoint_path)
+            model = build_binary_model(
+                metadata.resolved_model_name,
+                self.settings.model_num_classes,
+                loader_kind=metadata.loader_kind,
+            )
+            state_dict = extract_model_state_dict(checkpoint)
             model.load_state_dict(state_dict)
-        except (KeyError, RuntimeError, ValueError) as error:
+        except (FileNotFoundError, KeyError, RuntimeError, ValueError) as error:
             raise self._service_unavailable(str(error)) from error
 
         classifier = BinaryImageClassifier(model=model, settings=self.settings)
@@ -259,6 +301,15 @@ class InferenceFacade:
             loss=metadata.loss,
             classifier=classifier,
         )
+
+    def _get_local_model_record(self, external_id: str) -> LocalModelRecord:
+        record = load_local_models(self.settings).get(external_id)
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model '{external_id}' was not found",
+            )
+        return record
 
     def _decode_image(self, image_base64: str) -> bytes:
         return self._decode_base64_payload(image_base64, "imageBase64")
@@ -327,13 +378,6 @@ class InferenceFacade:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=message,
         )
-
-    def _ensure_known_model(self, external_id: str) -> None:
-        if external_id != self.settings.model_external_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Model '{external_id}' was not found",
-            )
 
     def _get_clearml_client(self) -> Any:
         from tazotron.integrations import clearml
