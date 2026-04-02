@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -33,6 +34,7 @@ class InferenceSettings(BaseSettings):
     clearml_project_name: str = "Tazotron"
     clearml_task_name: str = "radiologynet_binary_necrosis_autopose"
     clearml_artifact_name: str = "best_model_state_dict"
+    datasets_root_path: Path = Path("../.data")
 
 @lru_cache(maxsize=1)
 def get_settings() -> InferenceSettings:
