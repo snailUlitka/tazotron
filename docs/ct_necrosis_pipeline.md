@@ -5,6 +5,7 @@ Pipeline overview (rough sketch):
 - If coarse pelvic segmentation is available (see `DeepFluoroLabeling-IPCAI2020` datasets), locate femoral hemisphere inside the thigh segment and inject necrosis.
 - If fine segmentation is available, inject necrosis directly into the acetabular cup segment.
 - If no segmentation is available, locate the hemisphere heuristically and inject necrosis.
+- Current V1 pathology edit is a sector-based late AVN-like intensity transform for DRR realism; it does not perform real spatial collapse/warp.
 
 ### Required components
 - Synthetic necrosis generator: CT → CT with simulated necrosis.

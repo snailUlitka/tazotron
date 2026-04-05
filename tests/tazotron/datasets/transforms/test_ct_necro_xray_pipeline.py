@@ -9,14 +9,11 @@ import torchio as tio
 from diffdrr.data import transform_hu_to_density
 
 from tazotron.datasets.ct import CTDataset
-from tazotron.datasets.transforms.necro import NECROSIS_HU, AddRandomNecrosis
+from tazotron.datasets.transforms.necro import AddLateAVNLikeNecrosisV1
 from tazotron.datasets.transforms.xray import RenderDRR
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-LEFT_LABEL_ID = 1
-RIGHT_LABEL_ID = 2
 
 
 class _DummyDRR:
@@ -45,26 +42,13 @@ def _save_image(path: Path, tensor: torch.Tensor, *, label: bool = False) -> Non
     image_cls(tensor=tensor, affine=torch.eye(4)).save(path)
 
 
-def _expected_ct_after_necrosis(
-    ct: torch.Tensor,
-    label: torch.Tensor,
-    *,
-    intensity: float,
-    seed: int,
-) -> torch.Tensor:
-    expected = ct.clone()
-    mask = (label[0] == LEFT_LABEL_ID) | (label[0] == RIGHT_LABEL_ID)
-    coords = mask.nonzero(as_tuple=False)
-    num_necrosis_voxels = int(coords.shape[0] * intensity)
-    if num_necrosis_voxels <= 0:
-        return expected
-    generator = torch.Generator(device=mask.device.type)
-    generator.manual_seed(seed)
-    perm = torch.randperm(coords.shape[0], generator=generator)[:num_necrosis_voxels]
-    selected = coords[perm]
-    z, y, x = selected.unbind(dim=1)
-    expected[0, z, y, x] = NECROSIS_HU
-    return expected
+def _make_gradient_ct(shape: tuple[int, int, int], *, base: float) -> torch.Tensor:
+    axis_0 = torch.arange(shape[0], dtype=torch.float32)
+    axis_1 = torch.arange(shape[1], dtype=torch.float32)
+    axis_2 = torch.arange(shape[2], dtype=torch.float32)
+    grid_0, grid_1, grid_2 = torch.meshgrid(axis_0, axis_1, axis_2, indexing="ij")
+    ct = base + 8.0 * grid_0 + 2.5 * grid_1 + 1.5 * grid_2
+    return ct.unsqueeze(0)
 
 
 @pytest.mark.slow
@@ -77,11 +61,9 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
     patient_dir = tmp_path / "patient-001"
     patient_dir.mkdir(parents=True, exist_ok=True)
 
-    ct_tensor = torch.full((1, 2, 2, 2), fill_value=100.0, dtype=torch.float32)
-    left_label = torch.tensor(
-        [[[[1, 0], [0, 1]], [[0, 0], [1, 0]]]],
-        dtype=torch.int16,
-    )
+    ct_tensor = _make_gradient_ct((16, 16, 16), base=100.0)
+    left_label = torch.zeros_like(ct_tensor, dtype=torch.int16)
+    left_label[0, 3:12, 4:13, 4:13] = 1
     right_label = torch.zeros_like(left_label)
 
     ct_path = patient_dir / "ct.nii.gz"
@@ -96,9 +78,14 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
     _save_image(femur_left_path, torch.zeros_like(left_label), label=True)
     _save_image(femur_right_path, torch.zeros_like(left_label), label=True)
 
-    intensity = 0.5
-    seed = 42
-    necro = AddRandomNecrosis(intensity=intensity, seed=seed)
+    necro_config = {
+        "probability": 1.0,
+        "target_head": "random",
+        "severity": "moderate",
+        "seed": 42,
+        "bone_attenuation_multiplier": 1.0,
+    }
+    necro = AddLateAVNLikeNecrosisV1(necro_config)
     xray = RenderDRR({"device": "cpu"})
     saved_path = tmp_path / "xray.pt"
 
@@ -112,22 +99,20 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
 
     dataset = CTDataset(tmp_path, transform=pipeline)
     subject = dataset[0]
-
-    combined_label = subject["label_combined_femoral_head"].data
-    expected_ct = _expected_ct_after_necrosis(
-        ct_tensor,
-        combined_label,
-        intensity=intensity,
-        seed=seed,
-    )
-    expected_xray = expected_ct[0].sum(dim=0, keepdim=True).unsqueeze(0)
-    expected_density = transform_hu_to_density(expected_ct, 1.0)
-
     saved_xray = torch.load(saved_path)
-    assert saved_xray.shape == expected_xray.shape
-    assert torch.equal(saved_xray, expected_xray)
-    assert torch.equal(subject["xray"], expected_xray)
+    assert torch.equal(saved_xray, subject["xray"])
+    assert not torch.equal(subject["volume"].data, ct_tensor)
+    expected_density = transform_hu_to_density(subject["volume"].data, 1.0)
     assert torch.allclose(subject["density"].data, expected_density)
+
+    subject_reference = CTDataset(tmp_path)[0]
+    subject_reference["rotations"] = torch.zeros((1, 3), dtype=torch.float32)
+    subject_reference["translations"] = torch.zeros((1, 3), dtype=torch.float32)
+    subject_reference = AddLateAVNLikeNecrosisV1(necro_config)(subject_reference)
+    subject_reference = xray(subject_reference)
+
+    assert torch.equal(subject["volume"].data, subject_reference["volume"].data)
+    assert torch.equal(subject["xray"], subject_reference["xray"])
 
 
 @pytest.mark.slow
@@ -135,9 +120,9 @@ def test_real_drr_differs_with_necrosis_added(tmp_path: Path) -> None:
     patient_dir = tmp_path / "patient-002"
     patient_dir.mkdir(parents=True, exist_ok=True)
 
-    ct_tensor = torch.full((1, 8, 8, 8), fill_value=100.0, dtype=torch.float32)
+    ct_tensor = _make_gradient_ct((16, 16, 16), base=120.0)
     left_label = torch.zeros_like(ct_tensor, dtype=torch.int16)
-    left_label[0, 2:6, 2:6, 2:6] = 1
+    left_label[0, 4:12, 4:12, 4:12] = 1
     right_label = torch.zeros_like(left_label)
 
     ct_path = patient_dir / "ct.nii.gz"
@@ -164,7 +149,15 @@ def test_real_drr_differs_with_necrosis_added(tmp_path: Path) -> None:
     xray_clean = torch.nan_to_num(clean["xray"].detach().cpu())
 
     subject_necro = copy.deepcopy(base_subject)
-    necro = AddRandomNecrosis(intensity=1.0, seed=42)
+    necro = AddLateAVNLikeNecrosisV1(
+        {
+            "probability": 1.0,
+            "target_head": "random",
+            "severity": "severe",
+            "seed": 42,
+            "bone_attenuation_multiplier": 1.0,
+        },
+    )
     subject_necro = necro(subject_necro)
     necro_rendered = render(subject_necro)
     xray_necro = torch.nan_to_num(necro_rendered["xray"].detach().cpu())

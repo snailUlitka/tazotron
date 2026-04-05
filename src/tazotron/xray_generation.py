@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from tazotron.datasets.ct import COMBINED_FEMORAL_HEAD, CTDataset
 from tazotron.datasets.transforms.crop import BilateralHipROICrop
-from tazotron.datasets.transforms.necro import AddRandomNecrosis
+from tazotron.datasets.transforms.necro import AddLateAVNLikeNecrosisV1
 from tazotron.datasets.transforms.pose import AutoBilateralHipPose, InvalidBilateralMaskError
 from tazotron.datasets.transforms.xray import EMPTY_EPS, RenderDRR
 from tazotron.datasets.xray import XrayDataset
@@ -100,7 +100,15 @@ def render_xray_dataset_from_ct(
     without_necro_dir.mkdir(parents=True, exist_ok=True)
 
     render = RenderDRR({"device": device})
-    necro = AddRandomNecrosis(intensity=0.5, seed=42)
+    necro = AddLateAVNLikeNecrosisV1(
+        {
+            "probability": 1.0,
+            "target_head": "random",
+            "severity": "moderate",
+            "seed": 42,
+            "bone_attenuation_multiplier": 1.0,
+        },
+    )
     skipped_rows: list[tuple[str, str]] = []
 
     for index, ct_path in enumerate(tqdm(dataset.paths, desc="Rendering XRays", mininterval=2.0)):
