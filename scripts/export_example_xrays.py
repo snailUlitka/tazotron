@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 from pathlib import Path
 
 import torch
 
 from tazotron.datasets.ct import CTDataset, FEMORAL_HEAD_LEFT, FEMORAL_HEAD_RIGHT, FEMUR_LEFT, FEMUR_RIGHT
 from tazotron.datasets.transforms.femoral_head import AddFemoralHeadMasks
-from tazotron.datasets.transforms.necro import AddLateAVNLikeNecrosisV1
+from tazotron.datasets.transforms.necro import AddLateAVNLikeNecrosisV1, AddLateAVNLikeNecrosisV1Config
 from tazotron.datasets.transforms.xray import RenderDRR
 from tazotron.xray_generation import (
     _cast_volume_to_float32,
@@ -27,6 +28,23 @@ BEST_FEMORAL_HEAD_MASK_PARAMS: dict[str, float | int] = {
     "roundness_confirm_slices": 3,
     "roundness_backstep_slices": 0,
 }
+DEFAULT_EXAMPLE_NECRO_CONFIG = AddLateAVNLikeNecrosisV1Config.model_validate(
+    {
+        "probability": 1.0,
+        "target_head": "random",
+        "severity": "random",
+        "seed": 42,
+        "bone_attenuation_multiplier": 1.0,
+    },
+)
+def parse_float_pair(value: str) -> tuple[float, float]:
+    left, right = value.split(",", maxsplit=1)
+    return float(left), float(right)
+
+
+def parse_float_triple(value: str) -> tuple[float, float, float]:
+    first, second, third = value.split(",", maxsplit=2)
+    return float(first), float(second), float(third)
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +72,93 @@ def parse_args() -> argparse.Namespace:
         "--save-tiff",
         action="store_true",
         help="Also save TIFF copies alongside PNG files.",
+    )
+    parser.add_argument(
+        "--batch-presets",
+        action="store_true",
+        help="Render a bundle of necrosis variants for the same case.",
+    )
+    parser.add_argument(
+        "--target-head",
+        choices=("left", "right", "random"),
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.target_head,
+        help="Which femoral head to edit (default: random).",
+    )
+    parser.add_argument(
+        "--severity",
+        choices=("mild", "moderate", "severe", "random"),
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.severity,
+        help="Necrosis severity preset or random weighted sampling (default: random).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.seed,
+        help="Random seed for the necrosis transform (default: 42).",
+    )
+    parser.add_argument(
+        "--bone-attenuation-multiplier",
+        type=float,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.bone_attenuation_multiplier,
+        help="Density recomputation multiplier after the edit (default: 1.0).",
+    )
+    parser.add_argument(
+        "--severity-weights",
+        type=parse_float_triple,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.severity_weights,
+        metavar="MILD,MODERATE,SEVERE",
+        help="Weights used when --severity=random.",
+    )
+    parser.add_argument(
+        "--effect-strength-range",
+        type=parse_float_pair,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.effect_strength_range,
+        metavar="MIN,MAX",
+        help="Range for low/high remodeling strength multiplier.",
+    )
+    parser.add_argument(
+        "--collapse-strength-range",
+        type=parse_float_pair,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.collapse_strength_range,
+        metavar="MIN,MAX",
+        help="Range for subchondral collapse strength multiplier.",
+    )
+    parser.add_argument(
+        "--angle-jitter-deg",
+        type=float,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.angle_jitter_deg,
+        help="Angular jitter applied to the severity preset in degrees.",
+    )
+    parser.add_argument(
+        "--depth-jitter-ratio",
+        type=float,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.depth_jitter_ratio,
+        help="Relative jitter for sector depth ratio.",
+    )
+    parser.add_argument(
+        "--shell-depth-jitter-ratio",
+        type=float,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.shell_depth_jitter_ratio,
+        help="Relative jitter for shell depth ratio.",
+    )
+    parser.add_argument(
+        "--blob-count-jitter",
+        type=int,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.blob_count_jitter,
+        help="Integer jitter applied to preset blob counts.",
+    )
+    parser.add_argument(
+        "--blob-size-jitter-ratio",
+        type=float,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.blob_size_jitter_ratio,
+        help="Relative jitter for blob sigma sizes.",
+    )
+    parser.add_argument(
+        "--ap-jitter-range",
+        type=parse_float_pair,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.ap_jitter_range,
+        metavar="MIN,MAX",
+        help="Anterior-posterior pole jitter range.",
     )
     return parser.parse_args()
 
@@ -100,6 +205,178 @@ def save_example_images(
         save_uint8_image(diff_image, output_dir / "xray_heat_diff.tiff")
 
 
+def build_necro_config(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "probability": 1.0,
+        "target_head": args.target_head,
+        "severity": args.severity,
+        "seed": args.seed,
+        "bone_attenuation_multiplier": args.bone_attenuation_multiplier,
+        "severity_weights": args.severity_weights,
+        "effect_strength_range": args.effect_strength_range,
+        "collapse_strength_range": args.collapse_strength_range,
+        "angle_jitter_deg": args.angle_jitter_deg,
+        "depth_jitter_ratio": args.depth_jitter_ratio,
+        "shell_depth_jitter_ratio": args.shell_depth_jitter_ratio,
+        "blob_count_jitter": args.blob_count_jitter,
+        "blob_size_jitter_ratio": args.blob_size_jitter_ratio,
+        "ap_jitter_range": args.ap_jitter_range,
+    }
+
+
+def batch_metadata_row(*, variant_id: str, args: argparse.Namespace, necro_config: dict[str, object]) -> dict[str, object]:
+    row: dict[str, object] = {
+        "variant_id": variant_id,
+        "severity": args.severity,
+        "severity_weights": ",".join(str(value) for value in args.severity_weights),
+        "effect_strength_range": ",".join(str(value) for value in args.effect_strength_range),
+        "collapse_strength_range": ",".join(str(value) for value in args.collapse_strength_range),
+        "angle_jitter_deg": args.angle_jitter_deg,
+        "depth_jitter_ratio": args.depth_jitter_ratio,
+        "shell_depth_jitter_ratio": args.shell_depth_jitter_ratio,
+        "blob_size_jitter_ratio": args.blob_size_jitter_ratio,
+        "blob_count_jitter": args.blob_count_jitter,
+        "ap_jitter_range": ",".join(str(value) for value in args.ap_jitter_range),
+        "target_head": args.target_head,
+        "seed": args.seed,
+        "bone_attenuation_multiplier": args.bone_attenuation_multiplier,
+        "before_png": f"{variant_id}__before.png",
+        "after_png": f"{variant_id}__after.png",
+        "diff_heat_png": f"{variant_id}__diff_heat.png",
+    }
+    del necro_config
+    return row
+
+
+def save_variant_images(
+    *,
+    clean_xray,
+    necro_xray,
+    output_dir: Path,
+    variant_id: str,
+    save_tiff: bool,
+) -> None:
+    clean_image = xray_to_uint8_image(clean_xray)
+    necro_image = xray_to_uint8_image(necro_xray)
+    diff_image = make_xray_diff_heatmap(clean_xray, necro_xray)
+
+    save_uint8_image(clean_image, output_dir / f"{variant_id}__before.png")
+    save_uint8_image(necro_image, output_dir / f"{variant_id}__after.png")
+    save_uint8_image(diff_image, output_dir / f"{variant_id}__diff_heat.png")
+
+    if save_tiff:
+        save_uint8_image(clean_image, output_dir / f"{variant_id}__before.tiff")
+        save_uint8_image(necro_image, output_dir / f"{variant_id}__after.tiff")
+        save_uint8_image(diff_image, output_dir / f"{variant_id}__diff_heat.tiff")
+
+
+def batch_variants(args: argparse.Namespace) -> list[argparse.Namespace]:
+    def variant(**overrides: object) -> argparse.Namespace:
+        payload = vars(args).copy()
+        payload.update(overrides)
+        return argparse.Namespace(**payload)
+
+    return [
+        variant(
+            severity="random",
+            severity_weights=(0.15, 0.5, 0.35),
+            effect_strength_range=(1.0, 1.22),
+            collapse_strength_range=(1.08, 1.30),
+            angle_jitter_deg=5.0,
+            depth_jitter_ratio=0.14,
+            shell_depth_jitter_ratio=0.16,
+            blob_size_jitter_ratio=0.18,
+            blob_count_jitter=1,
+            ap_jitter_range=(-0.22, 0.22),
+        ),
+        variant(
+            severity="mild",
+            severity_weights=(0.7, 0.2, 0.1),
+            effect_strength_range=(0.95, 1.08),
+            collapse_strength_range=(1.00, 1.08),
+            angle_jitter_deg=3.0,
+            depth_jitter_ratio=0.10,
+            shell_depth_jitter_ratio=0.10,
+            blob_size_jitter_ratio=0.10,
+            blob_count_jitter=0,
+            ap_jitter_range=(-0.12, 0.12),
+        ),
+        variant(
+            severity="moderate",
+            severity_weights=(0.2, 0.7, 0.1),
+            effect_strength_range=(1.08, 1.24),
+            collapse_strength_range=(1.02, 1.12),
+            angle_jitter_deg=6.0,
+            depth_jitter_ratio=0.18,
+            shell_depth_jitter_ratio=0.10,
+            blob_size_jitter_ratio=0.22,
+            blob_count_jitter=2,
+            ap_jitter_range=(-0.18, 0.18),
+        ),
+        variant(
+            severity="moderate",
+            severity_weights=(0.1, 0.5, 0.4),
+            effect_strength_range=(1.00, 1.10),
+            collapse_strength_range=(1.18, 1.34),
+            angle_jitter_deg=6.0,
+            depth_jitter_ratio=0.12,
+            shell_depth_jitter_ratio=0.22,
+            blob_size_jitter_ratio=0.16,
+            blob_count_jitter=1,
+            ap_jitter_range=(-0.20, 0.20),
+        ),
+        variant(
+            severity="severe",
+            severity_weights=(0.05, 0.25, 0.70),
+            effect_strength_range=(1.10, 1.30),
+            collapse_strength_range=(1.24, 1.42),
+            angle_jitter_deg=8.0,
+            depth_jitter_ratio=0.20,
+            shell_depth_jitter_ratio=0.24,
+            blob_size_jitter_ratio=0.24,
+            blob_count_jitter=2,
+            ap_jitter_range=(-0.28, 0.28),
+        ),
+    ]
+
+
+def render_variant(framed, *, device: str, necro_config: dict[str, object]):
+    render = RenderDRR({"device": device})
+    necro = AddLateAVNLikeNecrosisV1(necro_config)
+    with torch.no_grad():
+        clean = render(copy.deepcopy(framed))
+        subject_necro = necro(copy.deepcopy(framed))
+        necro_rendered = render(subject_necro)
+    return clean["xray"], necro_rendered["xray"]
+
+
+def write_batch_metadata(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "variant_id",
+        "severity",
+        "severity_weights",
+        "effect_strength_range",
+        "collapse_strength_range",
+        "angle_jitter_deg",
+        "depth_jitter_ratio",
+        "shell_depth_jitter_ratio",
+        "blob_size_jitter_ratio",
+        "blob_count_jitter",
+        "ap_jitter_range",
+        "target_head",
+        "seed",
+        "bone_attenuation_multiplier",
+        "before_png",
+        "after_png",
+        "diff_heat_png",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> None:
     args = parse_args()
     case_dir = args.case_dir.resolve()
@@ -112,30 +389,38 @@ def main() -> None:
     _cast_volume_to_float32(subject)
     framed = apply_framing(subject, framing_mode="autopose")
 
-    render = RenderDRR({"device": args.device})
-    necro = AddLateAVNLikeNecrosisV1(
-        {
-            "probability": 1.0,
-            "target_head": "random",
-            "severity": "moderate",
-            "seed": 42,
-            "bone_attenuation_multiplier": 1.0,
-        },
-    )
+    if args.batch_presets:
+        batch_output_dir = output_dir / "batch"
+        metadata_rows: list[dict[str, object]] = []
+        for index, variant_args in enumerate(batch_variants(args), start=1):
+            necro_config = build_necro_config(variant_args)
+            clean_xray, necro_xray = render_variant(framed, device=args.device, necro_config=necro_config)
+            variant_id = f"variant_{index:03d}"
+            save_variant_images(
+                clean_xray=clean_xray,
+                necro_xray=necro_xray,
+                output_dir=batch_output_dir,
+                variant_id=variant_id,
+                save_tiff=args.save_tiff,
+            )
+            metadata_rows.append(batch_metadata_row(variant_id=variant_id, args=variant_args, necro_config=necro_config))
+            print(f"Saved batch variant to {batch_output_dir}: {variant_id}")
+            print(f"Necrosis config: {necro_config}")
+        metadata_path = batch_output_dir / "metadata.csv"
+        write_batch_metadata(metadata_path, metadata_rows)
+        print(f"Saved batch metadata to {metadata_path}")
+        return
 
-    with torch.no_grad():
-        clean = render(copy.deepcopy(framed))
-        subject_necro = necro(copy.deepcopy(framed))
-        necro_rendered = render(subject_necro)
-
+    clean_xray, necro_xray = render_variant(framed, device=args.device, necro_config=build_necro_config(args))
     save_example_images(
-        clean_xray=clean["xray"],
-        necro_xray=necro_rendered["xray"],
+        clean_xray=clean_xray,
+        necro_xray=necro_xray,
         output_dir=output_dir,
         save_tiff=args.save_tiff,
     )
 
     print(f"Saved example images to {output_dir}")
+    print(f"Necrosis config: {build_necro_config(args)}")
 
 
 if __name__ == "__main__":

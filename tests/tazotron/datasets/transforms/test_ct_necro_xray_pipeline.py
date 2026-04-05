@@ -116,7 +116,7 @@ def test_ct_to_necro_to_xray_pipeline_saves_expected_output(
 
 
 @pytest.mark.slow
-def test_real_drr_differs_with_necrosis_added(tmp_path: Path) -> None:
+def test_real_drr_differs_with_necrosis_added_and_severity_scales_effect(tmp_path: Path) -> None:
     patient_dir = tmp_path / "patient-002"
     patient_dir.mkdir(parents=True, exist_ok=True)
 
@@ -148,8 +148,22 @@ def test_real_drr_differs_with_necrosis_added(tmp_path: Path) -> None:
     clean = render(subject_clean)
     xray_clean = torch.nan_to_num(clean["xray"].detach().cpu())
 
-    subject_necro = copy.deepcopy(base_subject)
-    necro = AddLateAVNLikeNecrosisV1(
+    subject_moderate = copy.deepcopy(base_subject)
+    moderate_necro = AddLateAVNLikeNecrosisV1(
+        {
+            "probability": 1.0,
+            "target_head": "random",
+            "severity": "moderate",
+            "seed": 42,
+            "bone_attenuation_multiplier": 1.0,
+        },
+    )
+    subject_moderate = moderate_necro(subject_moderate)
+    moderate_rendered = render(subject_moderate)
+    xray_moderate = torch.nan_to_num(moderate_rendered["xray"].detach().cpu())
+
+    subject_severe = copy.deepcopy(base_subject)
+    severe_necro = AddLateAVNLikeNecrosisV1(
         {
             "probability": 1.0,
             "target_head": "random",
@@ -158,9 +172,12 @@ def test_real_drr_differs_with_necrosis_added(tmp_path: Path) -> None:
             "bone_attenuation_multiplier": 1.0,
         },
     )
-    subject_necro = necro(subject_necro)
-    necro_rendered = render(subject_necro)
-    xray_necro = torch.nan_to_num(necro_rendered["xray"].detach().cpu())
+    subject_severe = severe_necro(subject_severe)
+    severe_rendered = render(subject_severe)
+    xray_severe = torch.nan_to_num(severe_rendered["xray"].detach().cpu())
 
-    diff = (xray_necro - xray_clean).abs().sum().item()
-    assert diff > 0.0
+    moderate_diff = (xray_moderate - xray_clean).abs().sum().item()
+    severe_diff = (xray_severe - xray_clean).abs().sum().item()
+
+    assert moderate_diff > 0.0
+    assert severe_diff > moderate_diff

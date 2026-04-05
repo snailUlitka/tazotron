@@ -35,10 +35,20 @@ class _SeverityPreset:
     shell_depth_ratio: float
     low_blobs: int
     high_blobs: int
+    low_base_blend: float
     low_max_blend: float
     high_max_blend: float
     collapse_max_blend: float
     sigma_range_ratio: tuple[float, float]
+    irregularity_sigma_range_ratio: tuple[float, float]
+    shell_base_fraction: float
+    shell_irregularity_fraction: float
+
+
+@dataclass(frozen=True)
+class _ResolvedSeverity:
+    name: str
+    preset: _SeverityPreset
 
 
 @dataclass(frozen=True)
@@ -55,37 +65,49 @@ class _HeadGeometry:
 
 SEVERITY_PRESETS: dict[str, _SeverityPreset] = {
     "mild": _SeverityPreset(
-        half_angle_deg=28.0,
-        sector_depth_ratio=0.22,
-        shell_depth_ratio=0.08,
+        half_angle_deg=34.0,
+        sector_depth_ratio=0.28,
+        shell_depth_ratio=0.12,
         low_blobs=2,
         high_blobs=1,
-        low_max_blend=0.30,
-        high_max_blend=0.18,
-        collapse_max_blend=0.35,
-        sigma_range_ratio=(0.12, 0.18),
+        low_base_blend=0.08,
+        low_max_blend=0.40,
+        high_max_blend=0.10,
+        collapse_max_blend=0.46,
+        sigma_range_ratio=(0.18, 0.26),
+        irregularity_sigma_range_ratio=(0.28, 0.40),
+        shell_base_fraction=0.58,
+        shell_irregularity_fraction=0.50,
     ),
     "moderate": _SeverityPreset(
-        half_angle_deg=36.0,
-        sector_depth_ratio=0.30,
-        shell_depth_ratio=0.11,
+        half_angle_deg=42.0,
+        sector_depth_ratio=0.36,
+        shell_depth_ratio=0.15,
         low_blobs=3,
-        high_blobs=2,
-        low_max_blend=0.45,
-        high_max_blend=0.25,
-        collapse_max_blend=0.55,
-        sigma_range_ratio=(0.14, 0.22),
+        high_blobs=1,
+        low_base_blend=0.12,
+        low_max_blend=0.56,
+        high_max_blend=0.12,
+        collapse_max_blend=0.68,
+        sigma_range_ratio=(0.22, 0.32),
+        irregularity_sigma_range_ratio=(0.30, 0.44),
+        shell_base_fraction=0.64,
+        shell_irregularity_fraction=0.55,
     ),
     "severe": _SeverityPreset(
-        half_angle_deg=44.0,
-        sector_depth_ratio=0.38,
-        shell_depth_ratio=0.14,
-        low_blobs=4,
-        high_blobs=3,
-        low_max_blend=0.60,
-        high_max_blend=0.35,
-        collapse_max_blend=0.75,
-        sigma_range_ratio=(0.18, 0.28),
+        half_angle_deg=50.0,
+        sector_depth_ratio=0.44,
+        shell_depth_ratio=0.18,
+        low_blobs=3,
+        high_blobs=2,
+        low_base_blend=0.14,
+        low_max_blend=0.72,
+        high_max_blend=0.16,
+        collapse_max_blend=0.86,
+        sigma_range_ratio=(0.26, 0.38),
+        irregularity_sigma_range_ratio=(0.34, 0.50),
+        shell_base_fraction=0.68,
+        shell_irregularity_fraction=0.60,
     ),
 }
 
@@ -97,7 +119,7 @@ class AddLateAVNLikeNecrosisV1Config(BaseModel):
 
     probability: float = Field(default=1.0, ge=0.0, le=1.0)
     target_head: Literal["left", "right", "random"] = "random"
-    severity: Literal["mild", "moderate", "severe"] = "moderate"
+    severity: Literal["mild", "moderate", "severe", "random"] = "moderate"
     bone_attenuation_multiplier: float = 1.0
     label_name: str = COMBINED_FEMORAL_HEAD
     left_id: int = LEFT_LABEL
@@ -105,11 +127,32 @@ class AddLateAVNLikeNecrosisV1Config(BaseModel):
     seed: int | None = None
     generator: torch.Generator | None = None
     min_head_voxels: int = Field(default=256, ge=1)
+    severity_weights: tuple[float, float, float] = (0.15, 0.5, 0.35)
+    effect_strength_range: tuple[float, float] = (1.0, 1.22)
+    collapse_strength_range: tuple[float, float] = (1.08, 1.30)
+    angle_jitter_deg: float = Field(default=5.0, ge=0.0)
+    depth_jitter_ratio: float = Field(default=0.14, ge=0.0)
+    shell_depth_jitter_ratio: float = Field(default=0.16, ge=0.0)
+    blob_count_jitter: int = Field(default=1, ge=0)
+    blob_size_jitter_ratio: float = Field(default=0.18, ge=0.0)
+    ap_jitter_range: tuple[float, float] = (-0.22, 0.22)
 
     @model_validator(mode="after")
     def _validate_generator_settings(self) -> AddLateAVNLikeNecrosisV1Config:
         if self.seed is not None and self.generator is not None:
             msg = "seed and generator cannot be set at the same time."
+            raise ValueError(msg)
+        if sum(self.severity_weights) <= 0.0:
+            msg = "severity_weights must sum to a positive value."
+            raise ValueError(msg)
+        if self.effect_strength_range[0] > self.effect_strength_range[1]:
+            msg = "effect_strength_range must be ordered as (min, max)."
+            raise ValueError(msg)
+        if self.collapse_strength_range[0] > self.collapse_strength_range[1]:
+            msg = "collapse_strength_range must be ordered as (min, max)."
+            raise ValueError(msg)
+        if self.ap_jitter_range[0] > self.ap_jitter_range[1]:
+            msg = "ap_jitter_range must be ordered as (min, max)."
             raise ValueError(msg)
         return self
 
@@ -177,11 +220,11 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         if geometry is None:
             return subject
 
-        preset = SEVERITY_PRESETS[self.config.severity]
+        resolved = self._resolve_severity(volume.device, generator)
         sector_weight, shell_weight = self._build_sector_maps(
             geometry=geometry,
             head_name=head_name,
-            preset=preset,
+            preset=resolved.preset,
             device=volume.device,
             generator=generator,
         )
@@ -193,7 +236,8 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
             geometry=geometry,
             sector_weight=sector_weight,
             shell_weight=shell_weight,
-            preset=preset,
+            severity_name=resolved.name,
+            preset=resolved.preset,
             generator=generator,
         )
         if torch.equal(updated_volume, volume):
@@ -286,6 +330,106 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
             spacing_mm=spacing_mm,
         )
 
+    def _resolve_severity(
+        self,
+        device: torch.device,
+        generator: torch.Generator | None,
+    ) -> _ResolvedSeverity:
+        severity_name = self.config.severity
+        if severity_name == "random":
+            severity_name = self._sample_severity(device, generator)
+        base = SEVERITY_PRESETS[severity_name]
+        effect_strength = self._sample_uniform_range(
+            self.config.effect_strength_range[0],
+            self.config.effect_strength_range[1],
+            device,
+            generator,
+        )
+        collapse_strength = self._sample_uniform_range(
+            self.config.collapse_strength_range[0],
+            self.config.collapse_strength_range[1],
+            device,
+            generator,
+        )
+        angle_jitter = self._sample_uniform_range(
+            -self.config.angle_jitter_deg,
+            self.config.angle_jitter_deg,
+            device,
+            generator,
+        )
+        depth_multiplier = 1.0 + self._sample_uniform_range(
+            -self.config.depth_jitter_ratio,
+            self.config.depth_jitter_ratio,
+            device,
+            generator,
+        )
+        shell_depth_multiplier = 1.0 + self._sample_uniform_range(
+            -self.config.shell_depth_jitter_ratio,
+            self.config.shell_depth_jitter_ratio,
+            device,
+            generator,
+        )
+        sigma_multiplier = 1.0 + self._sample_uniform_range(
+            -self.config.blob_size_jitter_ratio,
+            self.config.blob_size_jitter_ratio,
+            device,
+            generator,
+        )
+        low_blobs = self._sample_blob_count(base.low_blobs, device, generator, minimum=1)
+        high_blobs = self._sample_blob_count(base.high_blobs, device, generator, minimum=0)
+        return _ResolvedSeverity(
+            name=severity_name,
+            preset=_SeverityPreset(
+                half_angle_deg=max(base.half_angle_deg + angle_jitter, 12.0),
+                sector_depth_ratio=max(base.sector_depth_ratio * depth_multiplier, 0.08),
+                shell_depth_ratio=max(base.shell_depth_ratio * shell_depth_multiplier, 0.04),
+                low_blobs=low_blobs,
+                high_blobs=high_blobs,
+                low_base_blend=min(base.low_base_blend * effect_strength, 0.4),
+                low_max_blend=min(base.low_max_blend * effect_strength, 0.9),
+                high_max_blend=min(base.high_max_blend * (0.85 + 0.15 * effect_strength), 0.25),
+                collapse_max_blend=min(base.collapse_max_blend * collapse_strength, 0.95),
+                sigma_range_ratio=tuple(value * sigma_multiplier for value in base.sigma_range_ratio),
+                irregularity_sigma_range_ratio=tuple(
+                    value * sigma_multiplier for value in base.irregularity_sigma_range_ratio
+                ),
+                shell_base_fraction=min(base.shell_base_fraction * collapse_strength, 0.85),
+                shell_irregularity_fraction=min(base.shell_irregularity_fraction * collapse_strength, 0.8),
+            ),
+        )
+
+    def _sample_severity(self, device: torch.device, generator: torch.Generator | None) -> str:
+        severities = ("mild", "moderate", "severe")
+        total = float(sum(self.config.severity_weights))
+        threshold = self._sample_uniform(device, generator) * total
+        cumulative = 0.0
+        for severity, weight in zip(severities, self.config.severity_weights, strict=True):
+            cumulative += weight
+            if threshold <= cumulative:
+                return severity
+        return severities[-1]
+
+    def _sample_blob_count(
+        self,
+        base_count: int,
+        device: torch.device,
+        generator: torch.Generator | None,
+        *,
+        minimum: int,
+    ) -> int:
+        if self.config.blob_count_jitter <= 0:
+            return max(base_count, minimum)
+        delta = int(
+            torch.randint(
+                -self.config.blob_count_jitter,
+                self.config.blob_count_jitter + 1,
+                (1,),
+                generator=generator,
+                device=device,
+            ).item(),
+        )
+        return max(base_count + delta, minimum)
+
     def _build_sector_maps(
         self,
         *,
@@ -296,7 +440,12 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         generator: torch.Generator | None,
     ) -> tuple[Tensor, Tensor]:
         lateral_sign = -1.0 if head_name == "left" else 1.0
-        ap_jitter = self._sample_uniform_range(-0.15, 0.15, device, generator)
+        ap_jitter = self._sample_uniform_range(
+            self.config.ap_jitter_range[0],
+            self.config.ap_jitter_range[1],
+            device,
+            generator,
+        )
         pole = torch.tensor(
             [lateral_sign, ap_jitter, 1.0],
             dtype=torch.float32,
@@ -309,7 +458,7 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         radial_dir = radial / radial_norm
         dot = torch.sum(radial_dir * pole, dim=-1)
 
-        outer_angle_deg = preset.half_angle_deg + 8.0
+        outer_angle_deg = preset.half_angle_deg + 10.0
         angular_weight = _smoothstep(
             torch.cos(torch.deg2rad(torch.tensor(outer_angle_deg, device=device))),
             torch.cos(torch.deg2rad(torch.tensor(preset.half_angle_deg, device=device))),
@@ -319,13 +468,13 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         sector_depth_mm = preset.sector_depth_ratio * geometry.radius_mm
         shell_depth_mm = preset.shell_depth_ratio * geometry.radius_mm
         sector_depth_weight = 1.0 - _smoothstep(
-            torch.tensor(sector_depth_mm * 0.6, dtype=torch.float32, device=device),
-            torch.tensor(sector_depth_mm, dtype=torch.float32, device=device),
+            torch.tensor(sector_depth_mm * 0.35, dtype=torch.float32, device=device),
+            torch.tensor(sector_depth_mm * 1.10, dtype=torch.float32, device=device),
             geometry.depth_mm,
         )
         shell_weight = 1.0 - _smoothstep(
-            torch.tensor(shell_depth_mm * 0.55, dtype=torch.float32, device=device),
-            torch.tensor(shell_depth_mm, dtype=torch.float32, device=device),
+            torch.tensor(shell_depth_mm * 0.30, dtype=torch.float32, device=device),
+            torch.tensor(shell_depth_mm * 1.25, dtype=torch.float32, device=device),
             geometry.depth_mm,
         )
         sector_weight = angular_weight * sector_depth_weight * geometry.head_mask_local.to(torch.float32)
@@ -339,6 +488,7 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         geometry: _HeadGeometry,
         sector_weight: Tensor,
         shell_weight: Tensor,
+        severity_name: str,
         preset: _SeverityPreset,
         generator: torch.Generator | None,
     ) -> Tensor:
@@ -348,7 +498,7 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         if head_values.numel() == 0:
             return volume
 
-        targets = self._estimate_targets(head_values)
+        targets = self._estimate_targets(head_values, severity_name)
         low_field = self._blob_field(
             world_local=geometry.world_local,
             candidate_mask=sector_weight > QUANTILE_EPS,
@@ -369,17 +519,25 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
             world_local=geometry.world_local,
             candidate_mask=shell_weight > QUANTILE_EPS,
             num_blobs=int(torch.randint(1, 3, (1,), generator=generator, device=volume.device).item()),
-            sigma_range_ratio=(0.24, 0.38),
+            sigma_range_ratio=preset.irregularity_sigma_range_ratio,
             radius_mm=geometry.radius_mm,
             generator=generator,
         )
 
-        low_weight = sector_weight * low_field * preset.low_max_blend
+        low_weight = sector_weight * (preset.low_base_blend + (1.0 - preset.low_base_blend) * low_field)
+        low_weight = low_weight * preset.low_max_blend
         high_weight = sector_weight * high_field * preset.high_max_blend
         high_weight = high_weight * (1.0 - low_weight).clamp_min(0.0)
         updated_local = local_ct + low_weight * (targets["low"] - local_ct) + high_weight * (targets["high"] - local_ct)
 
-        cap_weight = shell_weight * irregularity * preset.collapse_max_blend
+        base_cap_weight = shell_weight * preset.collapse_max_blend * preset.shell_base_fraction
+        irregular_cap_weight = (
+            shell_weight
+            * irregularity
+            * preset.collapse_max_blend
+            * preset.shell_irregularity_fraction
+        )
+        cap_weight = torch.clamp(base_cap_weight + irregular_cap_weight, max=preset.collapse_max_blend)
         updated_local = updated_local + cap_weight * (targets["collapse"] - updated_local)
 
         clamp_min = torch.tensor(targets["clamp_min"], dtype=updated_local.dtype, device=updated_local.device)
@@ -394,17 +552,23 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         updated_volume[(0, *bbox)] = torch.where(geometry.head_mask_local, updated_local, updated_volume[(0, *bbox)])
         return updated_volume
 
-    def _estimate_targets(self, head_values: Tensor) -> dict[str, float]:
+    def _estimate_targets(self, head_values: Tensor, severity_name: str) -> dict[str, float]:
         quantiles = torch.quantile(
             head_values.to(torch.float32),
             torch.tensor([0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95], device=head_values.device),
         )
         q05, q10, q25, q50, q75, q90, q95 = (float(value.item()) for value in quantiles)
-        severity = self.config.severity
-
-        low_target = {"mild": q25, "moderate": 0.5 * (q10 + q25), "severe": q10}[severity]
-        high_target = {"mild": q75, "moderate": 0.5 * (q75 + q90), "severe": q90}[severity]
-        collapse_scale = {"mild": 0.10, "moderate": 0.20, "severe": 0.30}[severity]
+        low_target = {
+            "mild": 0.7 * q25 + 0.3 * q10,
+            "moderate": q10,
+            "severe": 0.5 * (q05 + q10),
+        }[severity_name]
+        high_target = {
+            "mild": 0.5 * (q75 + q90),
+            "moderate": 0.65 * q75 + 0.35 * q90,
+            "severe": 0.5 * (q75 + q90),
+        }[severity_name]
+        collapse_scale = {"mild": 0.15, "moderate": 0.28, "severe": 0.40}[severity_name]
         collapse_target = max(q05, q10 - collapse_scale * (q50 - q10))
         return {
             "low": low_target,

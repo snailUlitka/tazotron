@@ -183,6 +183,66 @@ def test_seed_reproduces_identical_sequence() -> None:
 
 
 @pytest.mark.fast
+def test_reused_transform_produces_reproducible_but_non_identical_sequence() -> None:
+    subject_a1 = _make_subject()
+    subject_a2 = _make_subject(include_right_head=False)
+    subject_b1 = _make_subject()
+    subject_b2 = _make_subject(include_right_head=False)
+
+    transform_a = AddLateAVNLikeNecrosisV1({"target_head": "random", "severity": "random", "seed": 42})
+    transform_b = AddLateAVNLikeNecrosisV1({"target_head": "random", "severity": "random", "seed": 42})
+
+    transform_a(subject_a1)
+    transform_a(subject_a2)
+    transform_b(subject_b1)
+    transform_b(subject_b2)
+
+    assert torch.equal(subject_a1["volume"].data, subject_b1["volume"].data)
+    assert torch.equal(subject_a2["volume"].data, subject_b2["volume"].data)
+    assert not torch.equal(subject_a1["volume"].data, subject_a2["volume"].data)
+
+
+@pytest.mark.fast
+def test_random_severity_is_reproducible_for_same_seed() -> None:
+    subject_a = _make_subject()
+    subject_b = _make_subject()
+
+    AddLateAVNLikeNecrosisV1({"target_head": "random", "severity": "random", "seed": 101})(subject_a)
+    AddLateAVNLikeNecrosisV1({"target_head": "random", "severity": "random", "seed": 101})(subject_b)
+
+    assert torch.equal(subject_a["volume"].data, subject_b["volume"].data)
+
+
+@pytest.mark.fast
+def test_different_seeds_produce_different_patterns() -> None:
+    subject_a = _make_subject()
+    subject_b = _make_subject()
+
+    AddLateAVNLikeNecrosisV1({"target_head": "random", "severity": "random", "seed": 21})(subject_a)
+    AddLateAVNLikeNecrosisV1({"target_head": "random", "severity": "random", "seed": 22})(subject_b)
+
+    assert not torch.equal(subject_a["volume"].data, subject_b["volume"].data)
+
+
+@pytest.mark.fast
+def test_probability_gate_is_seeded_and_can_skip() -> None:
+    seed = 123
+    probability = 0.2
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    expected_apply = float(torch.rand((), generator=generator).item()) <= probability
+
+    subject = _make_subject()
+    before = subject["volume"].data.clone()
+    AddLateAVNLikeNecrosisV1(
+        {"probability": probability, "target_head": "left", "severity": "moderate", "seed": seed},
+    )(subject)
+
+    changed = not torch.equal(subject["volume"].data, before)
+    assert changed is expected_apply
+
+
+@pytest.mark.fast
 def test_density_is_recomputed_when_present() -> None:
     subject = _make_subject(include_density=True)
     old_density = subject["density"].data.clone()

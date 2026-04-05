@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -20,6 +19,8 @@ from tazotron.datasets.transforms.xray import EMPTY_EPS, RenderDRR
 from tazotron.datasets.xray import XrayDataset
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import torchio as tio
 
 LEGACY_CROP_MODE = "legacy_crop"
@@ -100,11 +101,13 @@ def render_xray_dataset_from_ct(
     without_necro_dir.mkdir(parents=True, exist_ok=True)
 
     render = RenderDRR({"device": device})
+    # Reuse one seeded transform instance across the whole dataset so the full
+    # diseased branch is reproducible while individual cases still differ.
     necro = AddLateAVNLikeNecrosisV1(
         {
             "probability": 1.0,
             "target_head": "random",
-            "severity": "moderate",
+            "severity": "random",
             "seed": 42,
             "bone_attenuation_multiplier": 1.0,
         },
