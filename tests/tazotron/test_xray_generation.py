@@ -9,7 +9,9 @@ import torchio as tio
 from tazotron.xray_generation import (
     AUTOPOSE_MODE,
     SKIP_REASON_INVALID_BILATERAL_MASK,
+    make_xray_diff_heatmap,
     render_xray_dataset_from_ct,
+    xray_to_uint8_image,
 )
 
 if TYPE_CHECKING:
@@ -81,3 +83,23 @@ def test_render_xray_dataset_from_ct_logs_invalid_mask_skip(monkeypatch: pytest.
     skipped_path = output_root / "skipped_xray_cases.tsv"
     assert skipped_path.is_file()
     assert SKIP_REASON_INVALID_BILATERAL_MASK in skipped_path.read_text(encoding="utf-8")
+
+
+def test_xray_to_uint8_image_normalizes_to_full_range() -> None:
+    tensor = torch.tensor([[0.0, 2.0], [4.0, 8.0]], dtype=torch.float32)
+    image = xray_to_uint8_image(tensor)
+    assert image.dtype == torch.uint8
+    assert int(image.min().item()) == 0
+    assert int(image.max().item()) == 255
+
+
+def test_make_xray_diff_heatmap_marks_brightening_in_red() -> None:
+    before = torch.tensor([[0.0, 0.0], [0.0, 0.0]], dtype=torch.float32)
+    after = torch.tensor([[0.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    heatmap = make_xray_diff_heatmap(before, after, sensitivity=12.0)
+
+    assert heatmap.shape == (2, 2, 3)
+    assert heatmap.dtype == torch.uint8
+    assert tuple(heatmap[0, 0].tolist()) == (0, 0, 255)
+    assert heatmap[1, 1, 0].item() == 255
+    assert heatmap[1, 1, 2].item() == 0

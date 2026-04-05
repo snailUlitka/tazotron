@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import torch
 from diffdrr.drr import DRR
+from PIL import Image
 from tqdm import tqdm
 
 from tazotron.datasets.ct import COMBINED_FEMORAL_HEAD, CTDataset
@@ -18,8 +20,6 @@ from tazotron.datasets.transforms.xray import EMPTY_EPS, RenderDRR
 from tazotron.datasets.xray import XrayDataset
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import torchio as tio
 
 LEGACY_CROP_MODE = "legacy_crop"
@@ -289,6 +289,42 @@ def squeeze_xray_tensor(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.detach().cpu().to(torch.float32)
     msg = f"Unsupported X-ray tensor shape: {tuple(tensor.shape)}"
     raise ValueError(msg)
+
+
+def xray_to_uint8_image(tensor: torch.Tensor) -> torch.Tensor:
+    """Normalize an X-ray tensor into a uint8 grayscale image."""
+    image = torch.nan_to_num(squeeze_xray_tensor(tensor))
+    image -= image.min()
+    max_value = float(image.max().item())
+    if max_value > 0.0:
+        image = image / max_value
+    return (image * 255.0).round().clamp(0, 255).to(torch.uint8)
+
+
+def make_xray_diff_heatmap(before: torch.Tensor, after: torch.Tensor, *, sensitivity: float = 12.0) -> torch.Tensor:
+    """Build a red/blue heatmap from two X-ray tensors.
+
+    Positive differences (``after`` brighter than ``before``) are red.
+    Near-equal pixels remain blue, matching the existing example workflow.
+    """
+    before_image = xray_to_uint8_image(before).to(torch.float32)
+    after_image = xray_to_uint8_image(after).to(torch.float32)
+    if before_image.shape != after_image.shape:
+        msg = f"Different X-ray sizes: {tuple(before_image.shape)} vs {tuple(after_image.shape)}"
+        raise ValueError(msg)
+
+    diff = (after_image - before_image) / 255.0
+    red = torch.clamp(torch.maximum(diff, torch.zeros_like(diff)) * sensitivity, 0.0, 1.0)
+    blue = 1.0 - torch.clamp(torch.abs(diff) * sensitivity, 0.0, 1.0)
+    green = torch.zeros_like(red)
+    rgb = torch.stack([red, green, blue], dim=-1)
+    return (rgb * 255.0).round().clamp(0, 255).to(torch.uint8)
+
+
+def save_uint8_image(image: torch.Tensor, path: Path) -> None:
+    """Persist a uint8 image tensor to disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(image.numpy()).save(path)
 
 
 def _cast_volume_to_float32(subject: tio.Subject) -> None:
