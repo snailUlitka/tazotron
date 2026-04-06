@@ -6,6 +6,8 @@ Pipeline overview (rough sketch):
 - If fine segmentation is available, inject necrosis directly into the acetabular cup segment.
 - If no segmentation is available, locate the hemisphere heuristically and inject necrosis.
 - Current V1 pathology edit is a sector-based late AVN-like intensity transform for DRR realism; it does not perform real spatial collapse/warp.
+- In production-style dataset generation, one seeded V1 transform instance is reused across the whole CT list so the full dataset is reproducible while individual cases still vary.
+- `target_head="random"` may now choose left, right, or both femoral heads; bilateral cases use independent stochastic draws per side, so the two patterns are related but not identical.
 
 ### Required components
 - Synthetic necrosis generator: CT → CT with simulated necrosis.

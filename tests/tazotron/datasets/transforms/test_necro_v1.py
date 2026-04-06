@@ -63,6 +63,33 @@ def _make_subject(
     return tio.Subject(data)
 
 
+def _make_symmetric_subject() -> tio.Subject:
+    left_mask = _make_sphere_mask((14.0, 24.0, 24.0))
+    right_mask = _make_sphere_mask((34.0, 24.0, 24.0))
+    combined = torch.zeros((1, *SHAPE), dtype=torch.int16)
+    combined[0][left_mask] = LEFT_LABEL_ID
+    combined[0][right_mask] = RIGHT_LABEL_ID
+
+    axis_0 = torch.arange(SHAPE[0], dtype=torch.float32)
+    axis_1 = torch.arange(SHAPE[1], dtype=torch.float32)
+    axis_2 = torch.arange(SHAPE[2], dtype=torch.float32)
+    grid_0, grid_1, grid_2 = torch.meshgrid(axis_0, axis_1, axis_2, indexing="ij")
+    mirrored_axis_0 = torch.minimum(grid_0, torch.full_like(grid_0, SHAPE[0] - 1) - grid_0)
+    radial_left = torch.sqrt((grid_0 - 14.0) ** 2 + (grid_1 - 24.0) ** 2 + (grid_2 - 24.0) ** 2)
+    radial_right = torch.sqrt((grid_0 - 34.0) ** 2 + (grid_1 - 24.0) ** 2 + (grid_2 - 24.0) ** 2)
+    ct = -850.0 + 5.0 * mirrored_axis_0 + 1.5 * grid_1 + 1.5 * grid_2
+    ct = ct.clone()
+    ct[left_mask] = 320.0 - 8.0 * radial_left[left_mask] + 1.5 * grid_2[left_mask]
+    ct[right_mask] = 320.0 - 8.0 * radial_right[right_mask] + 1.5 * grid_2[right_mask]
+    affine = torch.diag(torch.tensor([1.5, 1.5, 1.5, 1.0], dtype=torch.float32))
+    return tio.Subject(
+        {
+            "volume": tio.ScalarImage(tensor=ct.unsqueeze(0), affine=affine),
+            COMBINED_FEMORAL_HEAD: tio.LabelMap(tensor=combined, affine=affine),
+        },
+    )
+
+
 def _delta_inside_head(subject: tio.Subject, original_ct: torch.Tensor, label_id: int) -> torch.Tensor:
     delta = subject["volume"].data - original_ct
     label = subject[COMBINED_FEMORAL_HEAD].data
@@ -144,13 +171,64 @@ def test_random_target_modifies_exactly_one_available_head() -> None:
     subject = _make_subject()
     before = subject["volume"].data.clone()
 
-    AddLateAVNLikeNecrosisV1({"target_head": "random", "severity": "moderate", "seed": 13})(subject)
+    AddLateAVNLikeNecrosisV1(
+        {
+            "target_head": "random",
+            "target_head_weights": (1.0, 0.0, 0.0),
+            "severity": "moderate",
+            "seed": 13,
+        },
+    )(subject)
 
     label = subject[COMBINED_FEMORAL_HEAD].data
     delta = (subject["volume"].data - before).abs()
     left_changed = bool(torch.any(delta[label == LEFT_LABEL_ID] > DELTA_EPS))
     right_changed = bool(torch.any(delta[label == RIGHT_LABEL_ID] > DELTA_EPS))
     assert left_changed != right_changed
+
+
+@pytest.mark.fast
+def test_both_target_modifies_both_heads_only() -> None:
+    subject = _make_subject()
+    before = subject["volume"].data.clone()
+
+    AddLateAVNLikeNecrosisV1({"target_head": "both", "severity": "moderate", "seed": 13})(subject)
+
+    label = subject[COMBINED_FEMORAL_HEAD].data
+    delta = (subject["volume"].data - before).abs()
+    left_mask = label == LEFT_LABEL_ID
+    right_mask = label == RIGHT_LABEL_ID
+
+    assert torch.any(delta[left_mask] > DELTA_EPS)
+    assert torch.any(delta[right_mask] > DELTA_EPS)
+    assert not torch.any(delta[(~left_mask) & (~right_mask)] > DELTA_EPS)
+
+
+@pytest.mark.fast
+def test_bilateral_pattern_is_reproducible_for_same_seed() -> None:
+    subject_a = _make_subject()
+    subject_b = _make_subject()
+
+    AddLateAVNLikeNecrosisV1({"target_head": "both", "severity": "random", "seed": 77})(subject_a)
+    AddLateAVNLikeNecrosisV1({"target_head": "both", "severity": "random", "seed": 77})(subject_b)
+
+    assert torch.equal(subject_a["volume"].data, subject_b["volume"].data)
+
+
+@pytest.mark.fast
+def test_bilateral_patterns_are_not_identical_between_sides() -> None:
+    subject = _make_symmetric_subject()
+    before = subject["volume"].data.clone()
+
+    AddLateAVNLikeNecrosisV1({"target_head": "both", "severity": "random", "seed": 41})(subject)
+
+    label = subject[COMBINED_FEMORAL_HEAD].data
+    delta = subject["volume"].data - before
+    left_delta = delta[0] * (label[0] == LEFT_LABEL_ID)
+    right_delta = delta[0] * (label[0] == RIGHT_LABEL_ID)
+    mirrored_right_delta = torch.flip(right_delta, dims=(0,))
+
+    assert not torch.allclose(left_delta, mirrored_right_delta, atol=1e-4, rtol=0.0)
 
 
 @pytest.mark.fast
@@ -200,6 +278,26 @@ def test_reused_transform_produces_reproducible_but_non_identical_sequence() -> 
     assert torch.equal(subject_a1["volume"].data, subject_b1["volume"].data)
     assert torch.equal(subject_a2["volume"].data, subject_b2["volume"].data)
     assert not torch.equal(subject_a1["volume"].data, subject_a2["volume"].data)
+
+
+@pytest.mark.fast
+def test_random_target_weights_can_force_bilateral_mode() -> None:
+    subject = _make_subject()
+    before = subject["volume"].data.clone()
+
+    AddLateAVNLikeNecrosisV1(
+        {
+            "target_head": "random",
+            "target_head_weights": (0.0, 0.0, 1.0),
+            "severity": "moderate",
+            "seed": 17,
+        },
+    )(subject)
+
+    label = subject[COMBINED_FEMORAL_HEAD].data
+    delta = (subject["volume"].data - before).abs()
+    assert torch.any(delta[label == LEFT_LABEL_ID] > DELTA_EPS)
+    assert torch.any(delta[label == RIGHT_LABEL_ID] > DELTA_EPS)
 
 
 @pytest.mark.fast

@@ -251,6 +251,7 @@ class InferenceFacade:
             task = clearml_client.get_task(
                 project_name=self.settings.clearml_project_name,
                 task_name=self.settings.clearml_task_name,
+                tags=["radiologynet"],
             )
             checkpoint_path = clearml_client.get_task_artifact_path(
                 task,
@@ -352,7 +353,9 @@ class InferenceFacade:
                 )
             normalized[normalized_type] = segmentation
 
-        missing_types = [segmentation_type for segmentation_type in SEGMENTATION_FILE_NAMES if segmentation_type not in normalized]
+        missing_types = [
+            segmentation_type for segmentation_type in SEGMENTATION_FILE_NAMES if segmentation_type not in normalized
+        ]
         if missing_types:
             missing = ", ".join(missing_types)
             raise HTTPException(

@@ -111,6 +111,49 @@ SEVERITY_PRESETS: dict[str, _SeverityPreset] = {
     ),
 }
 
+LATE_AVN_REFERENCE_VARIANT_004: dict[str, object] = {
+    "severity": "moderate",
+    "severity_weights": (0.1, 0.5, 0.4),
+    "effect_strength_range": (1.0, 1.1),
+    "collapse_strength_range": (1.18, 1.34),
+    "angle_jitter_deg": 6.0,
+    "depth_jitter_ratio": 0.12,
+    "shell_depth_jitter_ratio": 0.22,
+    "blob_size_jitter_ratio": 0.16,
+    "blob_count_jitter": 1,
+    "ap_jitter_range": (-0.2, 0.2),
+}
+
+LATE_AVN_REFERENCE_VARIANT_005: dict[str, object] = {
+    "severity": "severe",
+    "severity_weights": (0.05, 0.25, 0.7),
+    "effect_strength_range": (1.1, 1.3),
+    "collapse_strength_range": (1.24, 1.42),
+    "angle_jitter_deg": 8.0,
+    "depth_jitter_ratio": 0.2,
+    "shell_depth_jitter_ratio": 0.24,
+    "blob_size_jitter_ratio": 0.24,
+    "blob_count_jitter": 2,
+    "ap_jitter_range": (-0.28, 0.28),
+}
+
+LATE_AVN_DATASET_DEFAULT_CONFIG: dict[str, object] = {
+    "probability": 1.0,
+    "target_head": "random",
+    "target_head_weights": (0.4, 0.4, 0.2),
+    "severity": "random",
+    "severity_weights": (0.08, 0.42, 0.5),
+    "effect_strength_range": (1.05, 1.22),
+    "collapse_strength_range": (1.2, 1.38),
+    "angle_jitter_deg": 7.0,
+    "depth_jitter_ratio": 0.16,
+    "shell_depth_jitter_ratio": 0.23,
+    "blob_size_jitter_ratio": 0.2,
+    "blob_count_jitter": 1,
+    "ap_jitter_range": (-0.24, 0.24),
+    "bone_attenuation_multiplier": 1.0,
+}
+
 
 class AddLateAVNLikeNecrosisV1Config(BaseModel):
     """Validated configuration for the late AVN-like femoral-head transform."""
@@ -118,8 +161,9 @@ class AddLateAVNLikeNecrosisV1Config(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     probability: float = Field(default=1.0, ge=0.0, le=1.0)
-    target_head: Literal["left", "right", "random"] = "random"
-    severity: Literal["mild", "moderate", "severe", "random"] = "moderate"
+    target_head: Literal["left", "right", "both", "random"] = "random"
+    target_head_weights: tuple[float, float, float] = (0.4, 0.4, 0.2)
+    severity: Literal["mild", "moderate", "severe", "random"] = "random"
     bone_attenuation_multiplier: float = 1.0
     label_name: str = COMBINED_FEMORAL_HEAD
     left_id: int = LEFT_LABEL
@@ -127,20 +171,23 @@ class AddLateAVNLikeNecrosisV1Config(BaseModel):
     seed: int | None = None
     generator: torch.Generator | None = None
     min_head_voxels: int = Field(default=256, ge=1)
-    severity_weights: tuple[float, float, float] = (0.15, 0.5, 0.35)
-    effect_strength_range: tuple[float, float] = (1.0, 1.22)
-    collapse_strength_range: tuple[float, float] = (1.08, 1.30)
-    angle_jitter_deg: float = Field(default=5.0, ge=0.0)
-    depth_jitter_ratio: float = Field(default=0.14, ge=0.0)
-    shell_depth_jitter_ratio: float = Field(default=0.16, ge=0.0)
+    severity_weights: tuple[float, float, float] = (0.08, 0.42, 0.5)
+    effect_strength_range: tuple[float, float] = (1.05, 1.22)
+    collapse_strength_range: tuple[float, float] = (1.2, 1.38)
+    angle_jitter_deg: float = Field(default=7.0, ge=0.0)
+    depth_jitter_ratio: float = Field(default=0.16, ge=0.0)
+    shell_depth_jitter_ratio: float = Field(default=0.23, ge=0.0)
     blob_count_jitter: int = Field(default=1, ge=0)
-    blob_size_jitter_ratio: float = Field(default=0.18, ge=0.0)
-    ap_jitter_range: tuple[float, float] = (-0.22, 0.22)
+    blob_size_jitter_ratio: float = Field(default=0.2, ge=0.0)
+    ap_jitter_range: tuple[float, float] = (-0.24, 0.24)
 
     @model_validator(mode="after")
     def _validate_generator_settings(self) -> AddLateAVNLikeNecrosisV1Config:
         if self.seed is not None and self.generator is not None:
             msg = "seed and generator cannot be set at the same time."
+            raise ValueError(msg)
+        if sum(self.target_head_weights) <= 0.0:
+            msg = "target_head_weights must sum to a positive value."
             raise ValueError(msg)
         if sum(self.severity_weights) <= 0.0:
             msg = "severity_weights must sum to a positive value."
@@ -158,14 +205,14 @@ class AddLateAVNLikeNecrosisV1Config(BaseModel):
 
 
 class AddLateAVNLikeNecrosisV1(v2.Transform):
-    """Apply a sector-based late AVN-like edit to exactly one femoral head.
+    """Apply a sector-based late AVN-like edit to one or both femoral heads.
 
     This V1 transform is intended for CT volumes that already use an anatomical
     RAS world orientation in the affine. It models a late AVN-like pattern via
     local intensity remodeling and pseudo-collapse in a superior-lateral
-    subchondral sector, without any spatial warp. The edit is localized to one
-    femoral head and is suitable for downstream DRR rendering, not for
-    medically exhaustive staging.
+    subchondral sector, without any spatial warp. The edit stays localized to
+    one or both femoral heads and is suitable for downstream DRR rendering,
+    not for medically exhaustive staging.
 
     Required subject fields
     -----------------------
@@ -181,7 +228,10 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
     -----
     The affine is interpreted in RAS terms: ``+X = Right``, ``+Y = Anterior``,
     ``+Z = Superior``. The superior-lateral pole therefore uses ``-X`` for the
-    left head and ``+X`` for the right head, with a small AP jitter.
+    left head and ``+X`` for the right head, with a small AP jitter. When
+    ``target_head="random"``, the transform can sample left, right, or both
+    heads; bilateral edits use independent stochastic draws per side while
+    remaining reproducible through the shared generator.
     """
 
     def __init__(self, config: AddLateAVNLikeNecrosisV1Config | dict[str, object] | None = None) -> None:
@@ -190,7 +240,7 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         self._seeded_generator: torch.Generator | None = None
         self._seeded_generator_device: torch.device | None = None
 
-    def __call__(self, subject: Any) -> Any:  # noqa: PLR0911
+    def __call__(self, subject: Any) -> Any:
         """Apply the transform to a ``torchio.Subject`` in place."""
         self._validate_subject(subject)
         volume_image = subject["volume"]
@@ -208,36 +258,15 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         if self.config.probability < 1.0 and self._sample_uniform(volume.device, generator) > self.config.probability:
             return subject
 
-        head_name = self._select_target_head(label, volume.device, generator)
-        if head_name is None:
+        head_names = self._select_target_heads(label, volume.device, generator)
+        if not head_names:
             return subject
 
-        head_mask = self._head_mask(label, head_name)
-        if int(head_mask.sum().item()) < self.config.min_head_voxels:
-            return subject
-
-        geometry = self._compute_head_geometry(head_mask, label_image.affine, volume.device)
-        if geometry is None:
-            return subject
-
-        resolved = self._resolve_severity(volume.device, generator)
-        sector_weight, shell_weight = self._build_sector_maps(
-            geometry=geometry,
-            head_name=head_name,
-            preset=resolved.preset,
-            device=volume.device,
-            generator=generator,
-        )
-        if float(sector_weight.max().item()) <= QUANTILE_EPS:
-            return subject
-
-        updated_volume = self._apply_late_avn_pattern(
+        updated_volume = self._apply_to_heads(
             volume=volume,
-            geometry=geometry,
-            sector_weight=sector_weight,
-            shell_weight=shell_weight,
-            severity_name=resolved.name,
-            preset=resolved.preset,
+            label=label,
+            affine=label_image.affine,
+            head_names=head_names,
             generator=generator,
         )
         if torch.equal(updated_volume, volume):
@@ -247,6 +276,47 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
         if "density" in subject:
             self._update_density(subject, updated_volume, volume_image)
         return subject
+
+    def _apply_to_heads(
+        self,
+        *,
+        volume: Tensor,
+        label: Tensor,
+        affine: Any,
+        head_names: list[str],
+        generator: torch.Generator | None,
+    ) -> Tensor:
+        updated_volume = volume
+        for head_name in head_names:
+            head_mask = self._head_mask(label, head_name)
+            if int(head_mask.sum().item()) < self.config.min_head_voxels:
+                continue
+
+            geometry = self._compute_head_geometry(head_mask, affine, volume.device)
+            if geometry is None:
+                continue
+
+            resolved = self._resolve_severity(volume.device, generator)
+            sector_weight, shell_weight = self._build_sector_maps(
+                geometry=geometry,
+                head_name=head_name,
+                preset=resolved.preset,
+                device=volume.device,
+                generator=generator,
+            )
+            if float(sector_weight.max().item()) <= QUANTILE_EPS:
+                continue
+
+            updated_volume = self._apply_late_avn_pattern(
+                volume=updated_volume,
+                geometry=geometry,
+                sector_weight=sector_weight,
+                shell_weight=shell_weight,
+                severity_name=resolved.name,
+                preset=resolved.preset,
+                generator=generator,
+            )
+        return updated_volume
 
     def _validate_subject(self, subject: Any) -> None:
         if not hasattr(subject, "__contains__") or not hasattr(subject, "__getitem__"):
@@ -259,27 +329,41 @@ class AddLateAVNLikeNecrosisV1(v2.Transform):
             msg = f"Subject must contain '{self.config.label_name}'."
             raise KeyError(msg)
 
-    def _select_target_head(
+    def _select_target_heads(
         self,
         label: Tensor,
         device: torch.device,
         generator: torch.Generator | None,
-    ) -> str | None:
+    ) -> list[str]:
         available: list[str] = []
         if torch.any(label == self.config.left_id):
             available.append("left")
         if torch.any(label == self.config.right_id):
             available.append("right")
         if not available:
-            return None
+            return []
         if self.config.target_head != "random":
-            return self.config.target_head if self.config.target_head in available else None
+            if self.config.target_head == "both":
+                return available
+            return [self.config.target_head] if self.config.target_head in available else []
         if len(available) == 1:
-            return available[0]
-        selected_index = int(
-            torch.randint(len(available), (1,), generator=generator, device=device, dtype=torch.int64).item(),
-        )
-        return available[selected_index]
+            return available
+
+        selected_mode = self._sample_target_head_mode(device, generator)
+        if selected_mode == "both":
+            return available
+        return [selected_mode]
+
+    def _sample_target_head_mode(self, device: torch.device, generator: torch.Generator | None) -> str:
+        modes = ("left", "right", "both")
+        total = float(sum(self.config.target_head_weights))
+        threshold = self._sample_uniform(device, generator) * total
+        cumulative = 0.0
+        for mode, weight in zip(modes, self.config.target_head_weights, strict=True):
+            cumulative += weight
+            if threshold <= cumulative:
+                return mode
+        return modes[-1]
 
     def _head_mask(self, label: Tensor, head_name: str) -> Tensor:
         label_id = self.config.left_id if head_name == "left" else self.config.right_id

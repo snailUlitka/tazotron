@@ -9,9 +9,21 @@ from pathlib import Path
 
 import torch
 
-from tazotron.datasets.ct import CTDataset, FEMORAL_HEAD_LEFT, FEMORAL_HEAD_RIGHT, FEMUR_LEFT, FEMUR_RIGHT
+from tazotron.datasets.ct import (
+    FEMORAL_HEAD_LEFT,
+    FEMORAL_HEAD_RIGHT,
+    FEMUR_LEFT,
+    FEMUR_RIGHT,
+    CTDataset,
+)
 from tazotron.datasets.transforms.femoral_head import AddFemoralHeadMasks
-from tazotron.datasets.transforms.necro import AddLateAVNLikeNecrosisV1, AddLateAVNLikeNecrosisV1Config
+from tazotron.datasets.transforms.necro import (
+    LATE_AVN_DATASET_DEFAULT_CONFIG,
+    LATE_AVN_REFERENCE_VARIANT_004,
+    LATE_AVN_REFERENCE_VARIANT_005,
+    AddLateAVNLikeNecrosisV1,
+    AddLateAVNLikeNecrosisV1Config,
+)
 from tazotron.datasets.transforms.xray import RenderDRR
 from tazotron.xray_generation import (
     _cast_volume_to_float32,
@@ -30,13 +42,12 @@ BEST_FEMORAL_HEAD_MASK_PARAMS: dict[str, float | int] = {
 }
 DEFAULT_EXAMPLE_NECRO_CONFIG = AddLateAVNLikeNecrosisV1Config.model_validate(
     {
-        "probability": 1.0,
-        "target_head": "random",
-        "severity": "random",
+        **LATE_AVN_DATASET_DEFAULT_CONFIG,
         "seed": 42,
-        "bone_attenuation_multiplier": 1.0,
     },
 )
+
+
 def parse_float_pair(value: str) -> tuple[float, float]:
     left, right = value.split(",", maxsplit=1)
     return float(left), float(right)
@@ -80,9 +91,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-head",
-        choices=("left", "right", "random"),
+        choices=("left", "right", "both", "random"),
         default=DEFAULT_EXAMPLE_NECRO_CONFIG.target_head,
         help="Which femoral head to edit (default: random).",
+    )
+    parser.add_argument(
+        "--target-head-weights",
+        type=parse_float_triple,
+        default=DEFAULT_EXAMPLE_NECRO_CONFIG.target_head_weights,
+        metavar="LEFT,RIGHT,BOTH",
+        help="Weights used when --target-head=random.",
     )
     parser.add_argument(
         "--severity",
@@ -209,6 +227,7 @@ def build_necro_config(args: argparse.Namespace) -> dict[str, object]:
     return {
         "probability": 1.0,
         "target_head": args.target_head,
+        "target_head_weights": args.target_head_weights,
         "severity": args.severity,
         "seed": args.seed,
         "bone_attenuation_multiplier": args.bone_attenuation_multiplier,
@@ -224,10 +243,16 @@ def build_necro_config(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def batch_metadata_row(*, variant_id: str, args: argparse.Namespace, necro_config: dict[str, object]) -> dict[str, object]:
+def batch_metadata_row(
+    *,
+    variant_id: str,
+    args: argparse.Namespace,
+    necro_config: dict[str, object],
+) -> dict[str, object]:
     row: dict[str, object] = {
         "variant_id": variant_id,
         "severity": args.severity,
+        "target_head_weights": ",".join(str(value) for value in args.target_head_weights),
         "severity_weights": ",".join(str(value) for value in args.severity_weights),
         "effect_strength_range": ",".join(str(value) for value in args.effect_strength_range),
         "collapse_strength_range": ",".join(str(value) for value in args.collapse_strength_range),
@@ -278,16 +303,7 @@ def batch_variants(args: argparse.Namespace) -> list[argparse.Namespace]:
 
     return [
         variant(
-            severity="random",
-            severity_weights=(0.15, 0.5, 0.35),
-            effect_strength_range=(1.0, 1.22),
-            collapse_strength_range=(1.08, 1.30),
-            angle_jitter_deg=5.0,
-            depth_jitter_ratio=0.14,
-            shell_depth_jitter_ratio=0.16,
-            blob_size_jitter_ratio=0.18,
-            blob_count_jitter=1,
-            ap_jitter_range=(-0.22, 0.22),
+            **LATE_AVN_DATASET_DEFAULT_CONFIG,
         ),
         variant(
             severity="mild",
@@ -314,28 +330,10 @@ def batch_variants(args: argparse.Namespace) -> list[argparse.Namespace]:
             ap_jitter_range=(-0.18, 0.18),
         ),
         variant(
-            severity="moderate",
-            severity_weights=(0.1, 0.5, 0.4),
-            effect_strength_range=(1.00, 1.10),
-            collapse_strength_range=(1.18, 1.34),
-            angle_jitter_deg=6.0,
-            depth_jitter_ratio=0.12,
-            shell_depth_jitter_ratio=0.22,
-            blob_size_jitter_ratio=0.16,
-            blob_count_jitter=1,
-            ap_jitter_range=(-0.20, 0.20),
+            **LATE_AVN_REFERENCE_VARIANT_004,
         ),
         variant(
-            severity="severe",
-            severity_weights=(0.05, 0.25, 0.70),
-            effect_strength_range=(1.10, 1.30),
-            collapse_strength_range=(1.24, 1.42),
-            angle_jitter_deg=8.0,
-            depth_jitter_ratio=0.20,
-            shell_depth_jitter_ratio=0.24,
-            blob_size_jitter_ratio=0.24,
-            blob_count_jitter=2,
-            ap_jitter_range=(-0.28, 0.28),
+            **LATE_AVN_REFERENCE_VARIANT_005,
         ),
     ]
 
@@ -355,6 +353,7 @@ def write_batch_metadata(path: Path, rows: list[dict[str, object]]) -> None:
     fieldnames = [
         "variant_id",
         "severity",
+        "target_head_weights",
         "severity_weights",
         "effect_strength_range",
         "collapse_strength_range",
@@ -403,7 +402,13 @@ def main() -> None:
                 variant_id=variant_id,
                 save_tiff=args.save_tiff,
             )
-            metadata_rows.append(batch_metadata_row(variant_id=variant_id, args=variant_args, necro_config=necro_config))
+            metadata_rows.append(
+                batch_metadata_row(
+                    variant_id=variant_id,
+                    args=variant_args,
+                    necro_config=necro_config,
+                ),
+            )
             print(f"Saved batch variant to {batch_output_dir}: {variant_id}")
             print(f"Necrosis config: {necro_config}")
         metadata_path = batch_output_dir / "metadata.csv"

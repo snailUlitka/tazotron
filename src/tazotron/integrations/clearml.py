@@ -239,10 +239,10 @@ def get_dataset_path(dataset_project: str, dataset_name: str) -> Path:
     return Path(dataset.get_local_copy())
 
 
-def get_task(project_name: str, task_name: str) -> Any:
+def get_task(project_name: str, task_name: str, **kwargs) -> Any:
     """Resolve a ClearML task by project and task name."""
     _, task_cls = _load_clearml()
-    task = task_cls.get_task(project_name=project_name, task_name=task_name)
+    task = task_cls.get_task(project_name=project_name, task_name=task_name, tags=kwargs["tags"])
     if task is None:
         msg = f"ClearML task '{task_name}' was not found in project '{project_name}'"
         raise ValueError(msg)

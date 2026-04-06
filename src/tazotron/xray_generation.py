@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from tazotron.datasets.ct import COMBINED_FEMORAL_HEAD, CTDataset
 from tazotron.datasets.transforms.crop import BilateralHipROICrop
-from tazotron.datasets.transforms.necro import AddLateAVNLikeNecrosisV1
+from tazotron.datasets.transforms.necro import LATE_AVN_DATASET_DEFAULT_CONFIG, AddLateAVNLikeNecrosisV1
 from tazotron.datasets.transforms.pose import AutoBilateralHipPose, InvalidBilateralMaskError
 from tazotron.datasets.transforms.xray import EMPTY_EPS, RenderDRR
 from tazotron.datasets.xray import XrayDataset
@@ -102,14 +102,12 @@ def render_xray_dataset_from_ct(
 
     render = RenderDRR({"device": device})
     # Reuse one seeded transform instance across the whole dataset so the full
-    # diseased branch is reproducible while individual cases still differ.
+    # diseased branch is reproducible while individual cases still differ. The
+    # random laterality mode can now pick left, right, or bilateral edits.
     necro = AddLateAVNLikeNecrosisV1(
         {
-            "probability": 1.0,
-            "target_head": "random",
-            "severity": "random",
+            **LATE_AVN_DATASET_DEFAULT_CONFIG,
             "seed": 42,
-            "bone_attenuation_multiplier": 1.0,
         },
     )
     skipped_rows: list[tuple[str, str]] = []
